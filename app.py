@@ -479,17 +479,17 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
         # ── Expanded detail panel ──
         if is_exp:
             with st.container():
-                st.markdown(
-                    "<div style='border-left:3px solid #4f8ef7;padding-left:16px;"
-                    "background:rgba(79,142,247,0.04);padding:16px 16px 20px 20px;margin-bottom:4px'>",
-                    unsafe_allow_html=True,
-                )
-
                 # Pending companies checklist
                 if r_pending.empty:
                     st.success("✅ All assigned companies are completed!")
                 else:
-                    st.markdown(f"**⏳ Pending Companies ({n_pending})**")
+                    st.markdown(
+                        f"<div style='border-left:3px solid #f59e0b;padding-left:12px;"
+                        f"margin-bottom:8px;font-size:0.95rem;font-weight:700;color:#f59e0b;"
+                        f"letter-spacing:0.02em'>"
+                        f"⏳ Pending Companies ({n_pending})</div>",
+                        unsafe_allow_html=True,
+                    )
                     with st.form(f"pend_{researcher}_{date_str}"):
                         hc0, hc1, hc2, hc3 = st.columns([6, 2, 1.2, 1.2])
                         hc0.markdown("**LEM/AM ↗ Company Name**")
@@ -586,7 +586,6 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
                             else:
                                 st.warning("Select at least one company to unmark.")
 
-                st.markdown("</div>", unsafe_allow_html=True)
 
 # ─── Tab 2: Companies ─────────────────────────────────────────────────────────
 def tab_companies(cdf: pd.DataFrame):
