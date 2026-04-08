@@ -147,11 +147,14 @@ def get_companies() -> pd.DataFrame:
     if not data:
         return pd.DataFrame(columns=[
             "id", "company_name", "assigned_to", "status",
-            "subsidiary_count", "date_completed", "qa_status", "fud_status", "created_at"
+            "subsidiary_count", "website_count", "date_completed", "qa_status", "fud_status", "created_at"
         ])
     df = pd.DataFrame(data)
     df["subsidiary_count"] = pd.to_numeric(
         df.get("subsidiary_count", 0), errors="coerce"
+    ).fillna(0).astype(int)
+    df["website_count"] = pd.to_numeric(
+        df.get("website_count", 0), errors="coerce"
     ).fillna(0).astype(int)
     for col in ["qa_status", "fud_status"]:
         if col not in df.columns:
@@ -182,6 +185,7 @@ def complete_companies(updates: list, date_str: str):
         sb.table("companies").update({
             "status": "completed",
             "subsidiary_count": u["subsidiary_count"],
+            "website_count": u.get("website_count", 0),
             "date_completed": date_str,
             "qa_status": u.get("qa_status", False),
             "fud_status": u.get("fud_status", False),
@@ -189,11 +193,12 @@ def complete_companies(updates: list, date_str: str):
     bust_cache()
 
 def save_qa_fud_only(entries: list):
-    """Save QA/FUD status without changing company status.
-    entries = [{"id": int, "qa_status": bool, "fud_status": bool}]"""
+    """Save counts and QA/FUD status without changing company status."""
     sb = get_sb()
     for e in entries:
         sb.table("companies").update({
+            "subsidiary_count": e.get("subsidiary_count", 0),
+            "website_count": e.get("website_count", 0),
             "qa_status": e["qa_status"],
             "fud_status": e["fud_status"],
         }).eq("id", e["id"]).execute()
@@ -491,18 +496,19 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
                         unsafe_allow_html=True,
                     )
                     with st.form(f"pend_{researcher}_{date_str}"):
-                        hc0, hc1, hc2, hc3 = st.columns([6, 2, 1.2, 1.2])
+                        hc0, hc1, hc2, hc3, hc4 = st.columns([6, 2, 2, 1.2, 1.2])
                         hc0.markdown("**LEM/AM ↗ Company Name**")
                         hc1.markdown("**Subsidiaries**")
-                        hc2.markdown("**QA**")
-                        hc3.markdown("**FUD**")
+                        hc2.markdown("**Websites**")
+                        hc3.markdown("**QA**")
+                        hc4.markdown("**FUD**")
                         st.markdown("<hr style='margin:4px 0 8px 0'>", unsafe_allow_html=True)
 
                         all_entries = []
                         to_complete = []
 
                         for _, row in r_pending.iterrows():
-                            cc0, cc1, cc2, cc3 = st.columns([6, 2, 1.2, 1.2])
+                            cc0, cc1, cc2, cc3, cc4 = st.columns([6, 2, 2, 1.2, 1.2])
                             lem_am = cc0.checkbox(
                                 str(row["company_name"]), value=False,
                                 key=f"lem_{row['id']}_{date_str}",
@@ -511,17 +517,21 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
                                 "sub", min_value=0, value=int(row["subsidiary_count"]),
                                 key=f"sub_{row['id']}_{date_str}", label_visibility="collapsed",
                             )
-                            qa = cc2.checkbox(
+                            web = cc2.number_input(
+                                "web", min_value=0, value=int(row.get("website_count", 0)),
+                                key=f"web_{row['id']}_{date_str}", label_visibility="collapsed",
+                            )
+                            qa = cc3.checkbox(
                                 "QA", value=bool(row.get("qa_status", False)),
                                 key=f"qa_{row['id']}_{date_str}", label_visibility="collapsed",
                             )
-                            fud = cc3.checkbox(
+                            fud = cc4.checkbox(
                                 "FUD", value=bool(row.get("fud_status", False)),
                                 key=f"fud_{row['id']}_{date_str}", label_visibility="collapsed",
                             )
                             entry = {
                                 "id": int(row["id"]), "subsidiary_count": sub,
-                                "qa_status": qa, "fud_status": fud,
+                                "website_count": web, "qa_status": qa, "fud_status": fud,
                             }
                             all_entries.append(entry)
                             if lem_am:
@@ -557,22 +567,24 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
                     st.divider()
                     st.markdown(f"**✅ Completed Today ({len(r_done_today)})** — check to unmark:")
                     with st.form(f"unmark_{researcher}_{date_str}"):
-                        hc0, hc1, hc2, hc3 = st.columns([6, 2, 1.2, 1.2])
+                        hc0, hc1, hc2, hc3, hc4 = st.columns([6, 2, 2, 1.2, 1.2])
                         hc0.markdown("**Unmark ↗ Company Name**")
                         hc1.markdown("**Subsidiaries**")
-                        hc2.markdown("**QA**")
-                        hc3.markdown("**FUD**")
+                        hc2.markdown("**Websites**")
+                        hc3.markdown("**QA**")
+                        hc4.markdown("**FUD**")
                         st.markdown("<hr style='margin:4px 0 8px 0'>", unsafe_allow_html=True)
                         to_unmark = []
                         for _, row in r_done_today.sort_values("company_name").iterrows():
-                            uc0, uc1, uc2, uc3 = st.columns([6, 2, 1.2, 1.2])
+                            uc0, uc1, uc2, uc3, uc4 = st.columns([6, 2, 2, 1.2, 1.2])
                             chk = uc0.checkbox(
                                 str(row["company_name"]), value=False,
                                 key=f"unk_{row['id']}_{date_str}",
                             )
                             uc1.markdown(f"`{int(row['subsidiary_count'])}`")
-                            uc2.markdown("✅" if row.get("qa_status") else "—")
-                            uc3.markdown("✅" if row.get("fud_status") else "—")
+                            uc2.markdown(f"`{int(row.get('website_count', 0))}`")
+                            uc3.markdown("✅" if row.get("qa_status") else "—")
+                            uc4.markdown("✅" if row.get("fud_status") else "—")
                             if chk:
                                 to_unmark.append(int(row["id"]))
                         st.markdown("")
@@ -650,11 +662,11 @@ def tab_companies(cdf: pd.DataFrame):
     ASSIGNEE_OPTIONS = ["— Unassigned —"] + RESEARCHERS
 
     display = view[
-        ["id", "company_name", "assigned_to", "status", "subsidiary_count",
+        ["id", "company_name", "assigned_to", "status", "subsidiary_count", "website_count",
          "qa_status", "fud_status", "date_completed"]
     ].copy()
     display.columns = [
-        "ID", "Company Name", "Assigned To", "Status", "Subsidiaries",
+        "ID", "Company Name", "Assigned To", "Status", "Subsidiaries", "Websites",
         "QA", "FUD", "Date Completed"
     ]
     # Normalise empty assignee to the placeholder so SelectboxColumn renders cleanly
@@ -798,11 +810,12 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
     ]
 
     # Overview — all from company-level data
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("✅ LEM/AM Completed", len(done_range))
     m2.metric("📦 Subsidiaries", int(done_range["subsidiary_count"].sum()) if not done_range.empty else 0)
-    m3.metric("🔍 QA Done", int(done_range["qa_status"].sum()) if not done_range.empty else 0)
-    m4.metric("📋 FUD Done", int(done_range["fud_status"].sum()) if not done_range.empty else 0)
+    m3.metric("🌐 Websites", int(done_range["website_count"].sum()) if not done_range.empty else 0)
+    m4.metric("🔍 QA Done", int(done_range["qa_status"].sum()) if not done_range.empty else 0)
+    m5.metric("📋 FUD Done", int(done_range["fud_status"].sum()) if not done_range.empty else 0)
 
     st.divider()
 
@@ -815,6 +828,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
             "Researcher": r,
             "LEM/AM Done": len(r_done),
             "Subsidiaries": int(r_done["subsidiary_count"].sum()) if not r_done.empty else 0,
+            "Websites": int(r_done["website_count"].sum()) if not r_done.empty else 0,
             "QA Done": int(r_done["qa_status"].sum()) if not r_done.empty else 0,
             "FUD Done": int(r_done["fud_status"].sum()) if not r_done.empty else 0,
         })
@@ -823,6 +837,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
         "Researcher": "TOTAL",
         "LEM/AM Done": summary["LEM/AM Done"].sum(),
         "Subsidiaries": summary["Subsidiaries"].sum(),
+        "Websites": summary["Websites"].sum(),
         "QA Done": summary["QA Done"].sum(),
         "FUD Done": summary["FUD Done"].sum(),
     }

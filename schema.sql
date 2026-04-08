@@ -27,8 +27,9 @@ create table if not exists daily_metrics (
 
 -- 3. Add company-level QA & FUD tracking columns
 --    (Run this separately if the table already exists)
-alter table companies add column if not exists qa_status  boolean not null default false;
-alter table companies add column if not exists fud_status boolean not null default false;
+alter table companies add column if not exists qa_status     boolean not null default false;
+alter table companies add column if not exists fud_status    boolean not null default false;
+alter table companies add column if not exists website_count integer not null default 0;
 
 -- ============================================================
 -- Row Level Security (RLS)
