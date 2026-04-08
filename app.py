@@ -676,7 +676,21 @@ def tab_companies(cdf: pd.DataFrame):
     display["Status"] = display["Status"].map({"completed": "✅ Completed", "pending": "⏳ Pending"})
     display["QA"]  = display["QA"].apply(lambda x: "✅" if x else "—")
     display["FUD"] = display["FUD"].apply(lambda x: "✅" if x else "—")
-    display.insert(0, "Select", False)
+    sel_all_key = f"sel_all_{f_researcher}_{f_status}_{f_search}"
+    if sel_all_key not in st.session_state:
+        st.session_state[sel_all_key] = False
+
+    _sa_col, _ = st.columns([1, 9])
+    with _sa_col:
+        if st.button(
+            "☑ Deselect All" if st.session_state[sel_all_key] else "☑ Select All",
+            key=f"btn_selall_{sel_all_key}",
+            use_container_width=True,
+        ):
+            st.session_state[sel_all_key] = not st.session_state[sel_all_key]
+            st.rerun()
+
+    display.insert(0, "Select", st.session_state[sel_all_key])
 
     # Snapshot original assignees so we can detect changes after editing
     original_assignees = display.set_index("ID")["Assigned To"].to_dict()
@@ -751,6 +765,7 @@ def tab_companies(cdf: pd.DataFrame):
             ids = selected["ID"].tolist()
             delete_companies(ids)
             st.session_state.op_count += 1
+            st.session_state[sel_all_key] = False
             st.success(f"Deleted {n_sel} company/companies.")
             st.rerun()
 
@@ -767,6 +782,7 @@ def tab_companies(cdf: pd.DataFrame):
             ids = sel_completed["ID"].tolist()
             revert_companies(ids)
             st.session_state.op_count += 1
+            st.session_state[sel_all_key] = False
             st.success(f"Reverted {len(ids)} companies to pending.")
             st.rerun()
 
