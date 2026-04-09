@@ -27,9 +27,18 @@ create table if not exists daily_metrics (
 
 -- 3. Add company-level QA & FUD tracking columns
 --    (Run this separately if the table already exists)
-alter table companies add column if not exists qa_status     boolean not null default false;
-alter table companies add column if not exists fud_status    boolean not null default false;
 alter table companies add column if not exists website_count integer not null default 0;
+
+-- QA and FUD now store reviewer names (text) instead of booleans
+-- Run these to migrate existing columns:
+alter table companies alter column qa_status  type text using null;
+alter table companies alter column fud_status type text using null;
+alter table companies alter column qa_status  drop not null;
+alter table companies alter column fud_status drop not null;
+alter table companies alter column qa_status  set default null;
+alter table companies alter column fud_status set default null;
+alter table companies add column if not exists qa_done_date  date;
+alter table companies add column if not exists fud_done_date date;
 
 -- ============================================================
 -- Row Level Security (RLS)
