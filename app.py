@@ -755,6 +755,8 @@ def tab_companies(cdf: pd.DataFrame):
     original_fud_reviewers = display.set_index("ID")["FUD Reviewer"].to_dict()
     original_qa_dates      = display.set_index("ID")["QA Date"].to_dict()
     original_fud_dates     = display.set_index("ID")["FUD Date"].to_dict()
+    original_subsidiaries  = display.set_index("ID")["Subsidiaries"].to_dict()
+    original_websites      = display.set_index("ID")["Websites"].to_dict()
     # Keep full row data for save logic
     id_to_row = view.set_index("id")
     sel_all_key = f"sel_all_{f_researcher}_{f_status}_{f_search}"
@@ -798,7 +800,7 @@ def tab_companies(cdf: pd.DataFrame):
             "QA Date":  st.column_config.DateColumn("QA Date",  width="small"),
             "FUD Date": st.column_config.DateColumn("FUD Date", width="small"),
         },
-        disabled=["ID", "Company Name", "Status", "Subsidiaries", "Websites", "LEM Date"],
+        disabled=["ID", "Company Name", "Status", "LEM Date"],
         hide_index=True,
         use_container_width=True,
         key=editor_key,
@@ -854,6 +856,28 @@ def tab_companies(cdf: pd.DataFrame):
             save_qa_fud(entries, today_str)
             st.session_state.op_count += 1
             st.success(f"Saved QA/FUD reviewers for {len(entries)} company/companies.")
+            st.rerun()
+
+    changed_counts = edited[
+        edited.apply(
+            lambda r: (
+                int(r["Subsidiaries"]) != int(original_subsidiaries.get(r["ID"], 0)) or
+                int(r["Websites"])     != int(original_websites.get(r["ID"], 0))
+            ), axis=1
+        )
+    ]
+    if not changed_counts.empty:
+        st.info(f"**{len(changed_counts)} count change(s) pending** — click Save to apply.")
+        if st.button("💾 Save Count Changes", type="primary", key="btn_save_counts"):
+            sb = get_sb()
+            for _, row in changed_counts.iterrows():
+                sb.table("companies").update({
+                    "subsidiary_count": int(row["Subsidiaries"]),
+                    "website_count":    int(row["Websites"]),
+                }).eq("id", int(row["ID"])).execute()
+            bust_cache()
+            st.session_state.op_count += 1
+            st.success(f"Saved counts for {len(changed_counts)} company/companies.")
             st.rerun()
 
     def _nd(v):
