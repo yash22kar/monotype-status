@@ -6,6 +6,8 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from supabase import create_client, Client
 
 # ─── Page Config ─────────────────────────────────────────────────────────────
@@ -1073,19 +1075,38 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
     daily["date_completed"] = pd.to_datetime(daily["date_completed"])
     daily = daily.sort_values("date_completed")
 
-    fig_line = px.line(
-        daily,
-        x="date_completed",
-        y=["Companies", "Subsidiaries"],
-        markers=True,
-        title="Daily Companies & Subsidiaries Completed",
-        labels={"date_completed": "Date", "value": "Count", "variable": "Metric"},
+    fig_line = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_line.add_trace(
+        go.Scatter(
+            x=daily["date_completed"],
+            y=daily["Companies"],
+            name="Companies",
+            mode="lines+markers",
+            line=dict(color="#1f77b4"),
+            marker=dict(size=6),
+        ),
+        secondary_y=False,
+    )
+    fig_line.add_trace(
+        go.Scatter(
+            x=daily["date_completed"],
+            y=daily["Subsidiaries"],
+            name="Subsidiaries",
+            mode="lines+markers",
+            line=dict(color="#17becf"),
+            marker=dict(size=6),
+        ),
+        secondary_y=True,
     )
     fig_line.update_layout(
+        title="Daily Companies & Subsidiaries Completed",
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis=dict(title="Date"),
     )
+    fig_line.update_yaxes(title_text="Companies", secondary_y=False)
+    fig_line.update_yaxes(title_text="Subsidiaries", secondary_y=True)
     st.plotly_chart(fig_line, use_container_width=True)
 
     # ── Pie chart: Overall completion ──
