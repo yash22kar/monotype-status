@@ -4,7 +4,8 @@ Streamlit + Supabase
 """
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, time
+import re
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -139,6 +140,19 @@ FUD_REVIEWERS = [
     "Manohar Chavan", "Vallabh Tupe", "Kajal Gupta",
 ]
 
+ASSET_COUNT_FIELDS = [
+    "subsidiary_count",
+    "website_count",
+    "app",
+    "digital_ads",
+    "epubs",
+    "software",
+    "dam",
+    "webserver",
+]
+ASSET_DATE_FIELDS = ["start_date", "end_date"]
+ASSET_TIME_FIELDS = ["start_time", "end_time"]
+
 # ─── Supabase Client ──────────────────────────────────────────────────────────
 @st.cache_resource
 def get_sb() -> Client:
@@ -166,15 +180,22 @@ def get_companies() -> pd.DataFrame:
         return pd.DataFrame(columns=[
             "id", "company_name", "assigned_to", "status",
             "subsidiary_count", "website_count", "date_completed",
+            "app", "digital_ads", "epubs", "software", "dam", "webserver",
+            "start_date", "end_date",
+            "start_time", "end_time",
             "qa_status", "fud_status", "qa_done_date", "fud_done_date", "created_at"
         ])
     df = pd.DataFrame(data)
-    df["subsidiary_count"] = pd.to_numeric(
-        df.get("subsidiary_count", 0), errors="coerce"
-    ).fillna(0).astype(int)
-    df["website_count"] = pd.to_numeric(
-        df.get("website_count", 0), errors="coerce"
-    ).fillna(0).astype(int)
+    for col in ASSET_COUNT_FIELDS:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    for col in ASSET_DATE_FIELDS:
+        if col not in df.columns:
+            df[col] = None
+    for col in ASSET_TIME_FIELDS:
+        if col not in df.columns:
+            df[col] = None
     for col in ["qa_status", "fud_status"]:
         if col not in df.columns:
             df[col] = ""
@@ -197,54 +218,176 @@ def bust_cache():
     _raw_companies.clear()
     _raw_metrics.clear()
 
+def _api_error_message(err: Exception) -> str:
+    # postgrest.exceptions.APIError often stores a dict as args[0]
+    try:
+        if getattr(err, "args", None) and err.args:
+            if isinstance(err.args[0], dict):
+                return err.args[0].get("message") or str(err.args[0])
+            return str(err.args[0])
+    except Exception:
+        pass
+    return str(err)
+
+def _pgrst_missing_column(err: Exception):
+    msg = _api_error_message(err)
+    m = re.search(r"Could not find the '([^']+)' column of '([^']+)'", msg)
+    if not m:
+        return None
+    return m.group(1)
+
+def _warn_missing_columns_once(table: str, cols: list):
+    if not cols:
+        return
+    key = f"_warned_missing_cols_{table}"
+    warned = set(st.session_state.get(key, []))
+    new_cols = [c for c in cols if c not in warned]
+    if not new_cols:
+        return
+    warned.update(new_cols)
+    st.session_state[key] = sorted(warned)
+    st.warning(
+        f"Database schema is missing columns on `{table}`: {', '.join(new_cols)}. "
+        "Run the SQL migration (see `schema.sql`) and then reload the Supabase API schema cache.",
+        icon="⚠️",
+    )
+
+def _safe_update_row(table: str, match_col: str, match_val, changes: dict, context: str = "record") -> bool:
+    """Update a row, retrying by dropping unknown columns (PGRST204) so the UI doesn't crash."""
+    if not changes:
+        return False
+
+    pending = dict(changes)
+    dropped = []
+    for _ in range(20):
+        try:
+            get_sb().table(table).update(pending).eq(match_col, match_val).execute()
+            if dropped:
+                _warn_missing_columns_once(table, dropped)
+            return True
+        except Exception as err:
+            missing = _pgrst_missing_column(err)
+            if missing and missing in pending:
+                dropped.append(missing)
+                pending.pop(missing, None)
+                if not pending:
+                    _warn_missing_columns_once(table, dropped)
+                    st.error(f"Could not update {context} because required columns are missing in Supabase.")
+                    return False
+                continue
+
+            st.error(f"Failed to update {context}.")
+            st.caption(_api_error_message(err))
+            return False
+
 # ─── DB Write Operations ──────────────────────────────────────────────────────
 def complete_companies(updates: list, date_str: str):
     """Mark as LEM/AM complete.
     updates = [{"id": int, "subsidiary_count": int, "qa_status": bool, "fud_status": bool}]"""
-    sb = get_sb()
     for u in updates:
-        sb.table("companies").update({
+        payload = {
             "status": "completed",
             "subsidiary_count": u["subsidiary_count"],
             "website_count": u.get("website_count", 0),
+            "app": u.get("app", 0),
+            "digital_ads": u.get("digital_ads", 0),
+            "epubs": u.get("epubs", 0),
+            "software": u.get("software", 0),
+            "dam": u.get("dam", 0),
+            "webserver": u.get("webserver", 0),
+            "start_date": _date_to_db(u.get("start_date")),
+            "end_date": _date_to_db(u.get("end_date")),
+            "start_time": _time_to_db(u.get("start_time")),
+            "end_time": _time_to_db(u.get("end_time")),
             "date_completed": date_str,
-            "qa_status":      u.get("qa_status")  or None,
-            "fud_status":     u.get("fud_status") or None,
-            "qa_done_date":   date_str if (u.get("qa_status")  or None) else None,
-            "fud_done_date":  date_str if (u.get("fud_status") or None) else None,
-        }).eq("id", u["id"]).execute()
+        }
+        if "qa_status" in u:
+            payload["qa_status"] = u.get("qa_status") or None
+            payload["qa_done_date"] = date_str if (u.get("qa_status") or None) else None
+        if "fud_status" in u:
+            payload["fud_status"] = u.get("fud_status") or None
+            payload["fud_done_date"] = date_str if (u.get("fud_status") or None) else None
+        _safe_update_row("companies", "id", u["id"], payload, context=f"company ID {u['id']}")
     bust_cache()
+
+def save_asset_mapping(entries: list):
+    """Save Asset Mapping counts/times without changing QA/FUD reviewer fields."""
+    for e in entries:
+        _safe_update_row("companies", "id", e["id"], {
+            "subsidiary_count": e.get("subsidiary_count", 0),
+            "website_count":    e.get("website_count", 0),
+            "app":              e.get("app", 0),
+            "digital_ads":      e.get("digital_ads", 0),
+            "epubs":            e.get("epubs", 0),
+            "software":         e.get("software", 0),
+            "dam":              e.get("dam", 0),
+            "webserver":        e.get("webserver", 0),
+            "start_date":       _date_to_db(e.get("start_date")),
+            "end_date":         _date_to_db(e.get("end_date")),
+            "start_time":       _time_to_db(e.get("start_time")),
+            "end_time":         _time_to_db(e.get("end_time")),
+        }, context=f"company ID {e['id']}")
+    bust_cache()
+
+def update_company_asset_fields(company_id: int, changes: dict):
+    """Update only the provided Asset Mapping fields for one company."""
+    if not changes:
+        return False
+    ok = _safe_update_row("companies", "id", company_id, changes, context=f"company ID {company_id}")
+    if ok:
+        bust_cache()
+        return True
+    return None
 
 def save_qa_fud(entries: list, today_str: str):
     """Save counts + QA/FUD reviewer names and auto-manage done dates."""
-    sb = get_sb()
     for e in entries:
         qa  = e.get("qa_status")  or None
         fud = e.get("fud_status") or None
         existing_qa_date  = e.get("qa_done_date")  or None
         existing_fud_date = e.get("fud_done_date") or None
-        sb.table("companies").update({
+        _safe_update_row("companies", "id", e["id"], {
             "subsidiary_count": e.get("subsidiary_count", 0),
             "website_count":    e.get("website_count", 0),
+            "app":              e.get("app", 0),
+            "digital_ads":      e.get("digital_ads", 0),
+            "epubs":            e.get("epubs", 0),
+            "software":         e.get("software", 0),
+            "dam":              e.get("dam", 0),
+            "webserver":        e.get("webserver", 0),
+            "start_date":       _date_to_db(e.get("start_date")),
+            "end_date":         _date_to_db(e.get("end_date")),
+            "start_time":       _time_to_db(e.get("start_time")),
+            "end_time":         _time_to_db(e.get("end_time")),
             "qa_status":        qa,
             "fud_status":       fud,
             "qa_done_date":     (existing_qa_date  or today_str) if qa  else None,
             "fud_done_date":    (existing_fud_date or today_str) if fud else None,
-        }).eq("id", e["id"]).execute()
+        }, context=f"company ID {e['id']}")
     bust_cache()
 
 def revert_companies(ids: list):
-    sb = get_sb()
     for cid in ids:
-        sb.table("companies").update({
+        _safe_update_row("companies", "id", cid, {
             "status": "pending",
             "subsidiary_count": 0,
+            "website_count": 0,
+            "app": 0,
+            "digital_ads": 0,
+            "epubs": 0,
+            "software": 0,
+            "dam": 0,
+            "webserver": 0,
+            "start_date": None,
+            "end_date": None,
+            "start_time": None,
+            "end_time": None,
             "date_completed": None,
             "qa_status": None,
             "fud_status": None,
             "qa_done_date": None,
             "fud_done_date": None,
-        }).eq("id", cid).execute()
+        }, context=f"company ID {cid}")
     bust_cache()
 
 def upsert_metrics(date_str: str, researcher: str, fud: int, qa: int):
@@ -269,6 +412,63 @@ def delete_companies(ids: list):
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def _now_ts():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def _date_to_db(value):
+    parsed = _parse_date_value(value)
+    return parsed.isoformat() if parsed else None
+
+def _parse_date_value(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
+
+def _time_to_db(value):
+    parsed = _parse_time_value(value)
+    return parsed.strftime("%H:%M:%S") if parsed else None
+
+def _parse_time_value(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, time):
+        return value.replace(second=0, microsecond=0)
+    if isinstance(value, datetime):
+        return value.time().replace(second=0, microsecond=0)
+
+    text = str(value).strip()
+    if not text or text.lower() == "nat":
+        return None
+
+    normalized = text.replace("T", " ")
+    if " " in normalized:
+        normalized = normalized.split(" ")[-1]
+    if "." in normalized:
+        normalized = normalized.split(".")[0]
+
+    for candidate, fmt in ((normalized, "%H:%M:%S"), (normalized[:5], "%H:%M")):
+        try:
+            return datetime.strptime(candidate, fmt).time().replace(second=0, microsecond=0)
+        except ValueError:
+            continue
+
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime().time().replace(second=0, microsecond=0)
+
+def _fmt_time(value):
+    parsed = _parse_time_value(value)
+    return parsed.strftime("%H:%M") if parsed else "—"
+
+def _fmt_date(value):
+    parsed = _parse_date_value(value)
+    return parsed.strftime("%Y/%m/%d") if parsed else "—"
 
 def _safe_col(df: pd.DataFrame, col: str) -> pd.Series:
     """Return a column filled with '' for NaN so string comparisons work safely."""
@@ -413,10 +613,10 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
     n_fud  = int(done_today["fud_status"].astype(bool).sum()) if not done_today.empty else 0
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.markdown(colored_metric("LEM/AM Done Today",   n_lem,  "linear-gradient(135deg,#1a6b3c,#27ae60)", "✅"), unsafe_allow_html=True)
+    m1.markdown(colored_metric("Asset Mapping Done Today",   n_lem,  "linear-gradient(135deg,#1a6b3c,#27ae60)", "✅"), unsafe_allow_html=True)
     m2.markdown(colored_metric("Subsidiaries Today",   n_sub,  "linear-gradient(135deg,#1a4a7a,#2980b9)", "📦"), unsafe_allow_html=True)
     m3.markdown(colored_metric("QA Done Today",        n_qa,   "linear-gradient(135deg,#5a1a7a,#8e44ad)", "🔍"), unsafe_allow_html=True)
-    m4.markdown(colored_metric("FUD Done Today",       n_fud,  "linear-gradient(135deg,#7a3a0a,#d35400)", "📋"), unsafe_allow_html=True)
+    m4.markdown(colored_metric("Salesforce Ready Today",       n_fud,  "linear-gradient(135deg,#7a3a0a,#d35400)", "📋"), unsafe_allow_html=True)
 
     st.divider()
 
@@ -529,19 +729,28 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
                         unsafe_allow_html=True,
                     )
                     with st.form(f"pend_{researcher}_{date_str}"):
-                        hc0, hc1, hc2, hc3, hc4 = st.columns([5, 1.5, 1.5, 3, 3])
-                        hc0.markdown("**LEM/AM ↗ Company Name**")
+                        field_widths = [3.2, 0.9, 0.9, 0.8, 1.0, 0.9, 1.0, 0.9, 1.0, 1.3, 1.2, 1.3, 1.2]
+                        hc0, hc1, hc2, hc3, hc4, hc5, hc6, hc7, hc8, hc9, hc10, hc11, hc12 = st.columns(field_widths)
+                        hc0.markdown("**Asset Mapping ↗ Company Name**")
                         hc1.markdown("**Subsidiaries**")
                         hc2.markdown("**Websites**")
-                        hc3.markdown("**QA Reviewer**")
-                        hc4.markdown("**FUD Reviewer**")
+                        hc3.markdown("**App**")
+                        hc4.markdown("**Digital Ads**")
+                        hc5.markdown("**Epubs**")
+                        hc6.markdown("**Software**")
+                        hc7.markdown("**DAM**")
+                        hc8.markdown("**Webserver**")
+                        hc9.markdown("**Start Date**")
+                        hc10.markdown("**Start Time**")
+                        hc11.markdown("**End Date**")
+                        hc12.markdown("**End Time**")
                         st.markdown("<hr style='margin:4px 0 8px 0'>", unsafe_allow_html=True)
 
                         all_entries = []
                         to_complete = []
 
                         for _, row in r_pending.iterrows():
-                            cc0, cc1, cc2, cc3, cc4 = st.columns([5, 1.5, 1.5, 3, 3])
+                            cc0, cc1, cc2, cc3, cc4, cc5, cc6, cc7, cc8, cc9, cc10, cc11, cc12 = st.columns(field_widths)
                             lem_am = cc0.checkbox(
                                 str(row["company_name"]), value=False,
                                 key=f"lem_{row['id']}_{date_str}",
@@ -554,27 +763,66 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
                                 "web", min_value=0, value=int(row.get("website_count", 0)),
                                 key=f"web_{row['id']}_{date_str}", label_visibility="collapsed",
                             )
-                            _qa_val = row.get("qa_status") or ""
-                            _qa_idx = QA_REVIEWERS.index(_qa_val) + 1 if _qa_val in QA_REVIEWERS else 0
-                            qa = cc3.selectbox(
-                                "QA", options=["— None —"] + QA_REVIEWERS,
-                                index=_qa_idx,
-                                key=f"qa_{row['id']}_{date_str}", label_visibility="collapsed",
+                            app_count = cc3.number_input(
+                                "app", min_value=0, value=int(row.get("app", 0)),
+                                key=f"app_{row['id']}_{date_str}", label_visibility="collapsed",
                             )
-                            _fud_val = row.get("fud_status") or ""
-                            _fud_idx = FUD_REVIEWERS.index(_fud_val) + 1 if _fud_val in FUD_REVIEWERS else 0
-                            fud = cc4.selectbox(
-                                "FUD", options=["— None —"] + FUD_REVIEWERS,
-                                index=_fud_idx,
-                                key=f"fud_{row['id']}_{date_str}", label_visibility="collapsed",
+                            digital_ads = cc4.number_input(
+                                "digital_ads", min_value=0, value=int(row.get("digital_ads", 0)),
+                                key=f"digital_ads_{row['id']}_{date_str}", label_visibility="collapsed",
+                            )
+                            epubs = cc5.number_input(
+                                "epubs", min_value=0, value=int(row.get("epubs", 0)),
+                                key=f"epubs_{row['id']}_{date_str}", label_visibility="collapsed",
+                            )
+                            software = cc6.number_input(
+                                "software", min_value=0, value=int(row.get("software", 0)),
+                                key=f"software_{row['id']}_{date_str}", label_visibility="collapsed",
+                            )
+                            dam = cc7.number_input(
+                                "dam", min_value=0, value=int(row.get("dam", 0)),
+                                key=f"dam_{row['id']}_{date_str}", label_visibility="collapsed",
+                            )
+                            webserver = cc8.number_input(
+                                "webserver", min_value=0, value=int(row.get("webserver", 0)),
+                                key=f"webserver_{row['id']}_{date_str}", label_visibility="collapsed",
+                            )
+                            start_date = cc9.date_input(
+                                "start_date",
+                                value=_parse_date_value(row.get("start_date")) or sel_date,
+                                key=f"start_date_{row['id']}_{date_str}",
+                                label_visibility="collapsed",
+                            )
+                            start_time = cc10.time_input(
+                                "start_time", value=_parse_time_value(row.get("start_time")),
+                                key=f"start_time_{row['id']}_{date_str}", label_visibility="collapsed",
+                                step=60,
+                            )
+                            end_date = cc11.date_input(
+                                "end_date",
+                                value=_parse_date_value(row.get("end_date")) or sel_date,
+                                key=f"end_date_{row['id']}_{date_str}",
+                                label_visibility="collapsed",
+                            )
+                            end_time = cc12.time_input(
+                                "end_time", value=_parse_time_value(row.get("end_time")),
+                                key=f"end_time_{row['id']}_{date_str}", label_visibility="collapsed",
+                                step=60,
                             )
                             entry = {
-                                "id": int(row["id"]), "subsidiary_count": sub,
+                                "id": int(row["id"]),
+                                "subsidiary_count": sub,
                                 "website_count": web,
-                                "qa_status":      "" if qa  == "— None —" else qa,
-                                "fud_status":     "" if fud == "— None —" else fud,
-                                "qa_done_date":   row.get("qa_done_date"),
-                                "fud_done_date":  row.get("fud_done_date"),
+                                "app": app_count,
+                                "digital_ads": digital_ads,
+                                "epubs": epubs,
+                                "software": software,
+                                "dam": dam,
+                                "webserver": webserver,
+                                "start_date": start_date,
+                                "start_time": start_time,
+                                "end_date": end_date,
+                                "end_time": end_time,
                             }
                             all_entries.append(entry)
                             if lem_am:
@@ -582,27 +830,27 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
 
                         st.markdown("")
                         bc1, bc2 = st.columns(2)
-                        save_qf  = bc1.form_submit_button("💾 Save QA / FUD Status", use_container_width=True)
-                        mark_lem = bc2.form_submit_button("✅ Mark LEM/AM Complete", type="primary", use_container_width=True)
+                        save_qf  = bc1.form_submit_button("💾 Save Asset Mapping Progress", use_container_width=True)
+                        mark_lem = bc2.form_submit_button("✅ Mark Asset Mapping Complete", type="primary", use_container_width=True)
 
                         if mark_lem:
                             if to_complete:
                                 complete_ids = {e["id"] for e in to_complete}
                                 non_complete = [e for e in all_entries if e["id"] not in complete_ids]
                                 if non_complete:
-                                    save_qa_fud(non_complete, date_str)
+                                    save_asset_mapping(non_complete)
                                 complete_companies(to_complete, date_str)
                                 st.session_state.last_saved = _now_ts()
                                 st.session_state.op_count += 1
-                                st.success(f"Marked {len(to_complete)} companies as LEM/AM complete!")
+                                st.success(f"Marked {len(to_complete)} companies as Asset Mapping complete!")
                                 st.rerun()
                             else:
-                                st.warning("Check at least one LEM/AM checkbox to mark complete.")
+                                st.warning("Check at least one Asset Mapping checkbox to mark complete.")
                         if save_qf:
-                            save_qa_fud(all_entries, date_str)
+                            save_asset_mapping(all_entries)
                             st.session_state.last_saved = _now_ts()
                             st.session_state.op_count += 1
-                            st.success("QA / FUD status saved!")
+                            st.success("Asset Mapping progress saved!")
                             st.rerun()
 
                 # Completed today with unmark
@@ -610,52 +858,45 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
                     st.divider()
                     st.markdown(f"**✅ Completed Today ({len(r_done_today)})** — check to unmark:")
                     with st.form(f"unmark_{researcher}_{date_str}"):
-                        hc0, hc1, hc2, hc3, hc4 = st.columns([5, 1.5, 1.5, 3, 3])
+                        field_widths = [3.2, 0.9, 0.9, 0.8, 1.0, 0.9, 1.0, 0.9, 1.0, 1.3, 1.2, 1.3, 1.2]
+                        hc0, hc1, hc2, hc3, hc4, hc5, hc6, hc7, hc8, hc9, hc10, hc11, hc12 = st.columns(field_widths)
                         hc0.markdown("**Unmark ↗ Company Name**")
                         hc1.markdown("**Subsidiaries**")
                         hc2.markdown("**Websites**")
-                        hc3.markdown("**QA Reviewer**")
-                        hc4.markdown("**FUD Reviewer**")
+                        hc3.markdown("**App**")
+                        hc4.markdown("**Digital Ads**")
+                        hc5.markdown("**Epubs**")
+                        hc6.markdown("**Software**")
+                        hc7.markdown("**DAM**")
+                        hc8.markdown("**Webserver**")
+                        hc9.markdown("**Start Date**")
+                        hc10.markdown("**Start Time**")
+                        hc11.markdown("**End Date**")
+                        hc12.markdown("**End Time**")
                         st.markdown("<hr style='margin:4px 0 8px 0'>", unsafe_allow_html=True)
                         to_unmark = []
-                        done_entries = []
                         for _, row in r_done_today.sort_values("company_name").iterrows():
-                            uc0, uc1, uc2, uc3, uc4 = st.columns([5, 1.5, 1.5, 3, 3])
+                            uc0, uc1, uc2, uc3, uc4, uc5, uc6, uc7, uc8, uc9, uc10, uc11, uc12 = st.columns(field_widths)
                             chk = uc0.checkbox(
                                 str(row["company_name"]), value=False,
                                 key=f"unk_{row['id']}_{date_str}",
                             )
                             uc1.markdown(f"`{int(row['subsidiary_count'])}`")
                             uc2.markdown(f"`{int(row.get('website_count', 0))}`")
-                            _qa_val  = row.get("qa_status")  or ""
-                            _fud_val = row.get("fud_status") or ""
-                            _qa_idx  = QA_REVIEWERS.index(_qa_val)  + 1 if _qa_val  in QA_REVIEWERS  else 0
-                            _fud_idx = FUD_REVIEWERS.index(_fud_val) + 1 if _fud_val in FUD_REVIEWERS else 0
-                            qa_sel  = uc3.selectbox("QA",  options=["— None —"] + QA_REVIEWERS,
-                                index=_qa_idx,  key=f"dqa_{row['id']}_{date_str}",  label_visibility="collapsed")
-                            fud_sel = uc4.selectbox("FUD", options=["— None —"] + FUD_REVIEWERS,
-                                index=_fud_idx, key=f"dfud_{row['id']}_{date_str}", label_visibility="collapsed")
+                            uc3.markdown(f"`{int(row.get('app', 0))}`")
+                            uc4.markdown(f"`{int(row.get('digital_ads', 0))}`")
+                            uc5.markdown(f"`{int(row.get('epubs', 0))}`")
+                            uc6.markdown(f"`{int(row.get('software', 0))}`")
+                            uc7.markdown(f"`{int(row.get('dam', 0))}`")
+                            uc8.markdown(f"`{int(row.get('webserver', 0))}`")
+                            uc9.markdown(f"`{_fmt_date(row.get('start_date'))}`")
+                            uc10.markdown(f"`{_fmt_time(row.get('start_time'))}`")
+                            uc11.markdown(f"`{_fmt_date(row.get('end_date'))}`")
+                            uc12.markdown(f"`{_fmt_time(row.get('end_time'))}`")
                             if chk:
                                 to_unmark.append(int(row["id"]))
-                            done_entries.append({
-                                "id":            int(row["id"]),
-                                "subsidiary_count": int(row["subsidiary_count"]),
-                                "website_count":    int(row.get("website_count", 0)),
-                                "qa_status":     "" if qa_sel  == "— None —" else qa_sel,
-                                "fud_status":    "" if fud_sel == "— None —" else fud_sel,
-                                "qa_done_date":  row.get("qa_done_date"),
-                                "fud_done_date": row.get("fud_done_date"),
-                            })
                         st.markdown("")
-                        sb1, sb2 = st.columns(2)
-                        save_done_qf = sb1.form_submit_button("💾 Save QA / FUD", use_container_width=True)
-                        unmark_btn   = sb2.form_submit_button("↩️ Unmark Selected (revert to Pending)", use_container_width=True)
-                        if save_done_qf:
-                            save_qa_fud(done_entries, date_str)
-                            st.session_state.last_saved = _now_ts()
-                            st.session_state.op_count += 1
-                            st.success("QA / FUD reviewers saved!")
-                            st.rerun()
+                        unmark_btn = st.form_submit_button("↩️ Unmark Selected (revert to Pending)", use_container_width=True)
                         if unmark_btn:
                             if to_unmark:
                                 revert_companies(to_unmark)
@@ -916,6 +1157,68 @@ def tab_companies(cdf: pd.DataFrame):
     selected = edited[edited["Select"] == True]
     n_sel = len(selected)
 
+    st.markdown("---")
+    if n_sel == 1:
+        selected_id = int(selected.iloc[0]["ID"])
+        selected_row = id_to_row.loc[selected_id] if selected_id in id_to_row.index else None
+
+        if selected_row is not None:
+            st.markdown("### Selected Company Asset Mapping")
+            st.caption(f"Editing: {selected_row.get('company_name', '')} (ID: {selected_id})")
+
+            with st.form(f"company_asset_edit_top_{selected_id}_{st.session_state.get('op_count', 0)}"):
+                ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                subsidiaries_val = ec1.number_input("Subsidiaries", min_value=0, value=int(selected_row.get("subsidiary_count", 0)), key=f"cmp_top_sub_{selected_id}")
+                websites_val = ec2.number_input("Websites", min_value=0, value=int(selected_row.get("website_count", 0)), key=f"cmp_top_web_{selected_id}")
+                digital_ads_val = ec3.number_input("Digital Ads", min_value=0, value=int(selected_row.get("digital_ads", 0)), key=f"cmp_top_digital_ads_{selected_id}")
+                epubs_val = ec4.number_input("Epubs", min_value=0, value=int(selected_row.get("epubs", 0)), key=f"cmp_top_epubs_{selected_id}")
+                software_val = ec5.number_input("Software", min_value=0, value=int(selected_row.get("software", 0)), key=f"cmp_top_software_{selected_id}")
+
+                ec6, ec7, ec8, ec9 = st.columns(4)
+                dam_val = ec6.number_input("DAM", min_value=0, value=int(selected_row.get("dam", 0)), key=f"cmp_top_dam_{selected_id}")
+                webserver_val = ec7.number_input("Webserver", min_value=0, value=int(selected_row.get("webserver", 0)), key=f"cmp_top_webserver_{selected_id}")
+                start_time_val = ec8.time_input("Start Time", value=_parse_time_value(selected_row.get("start_time")), key=f"cmp_top_start_time_{selected_id}", step=60)
+                end_time_val = ec9.time_input("End Time", value=_parse_time_value(selected_row.get("end_time")), key=f"cmp_top_end_time_{selected_id}", step=60)
+
+                save_asset_changes_top = st.form_submit_button("💾 Save Asset Mapping Changes", type="primary", use_container_width=True)
+
+            if save_asset_changes_top:
+                proposed_values = {
+                    "subsidiary_count": int(subsidiaries_val),
+                    "website_count": int(websites_val),
+                    "digital_ads": int(digital_ads_val),
+                    "epubs": int(epubs_val),
+                    "software": int(software_val),
+                    "dam": int(dam_val),
+                    "webserver": int(webserver_val),
+                    "start_time": _time_to_db(start_time_val),
+                    "end_time": _time_to_db(end_time_val),
+                }
+                original_values = {
+                    "subsidiary_count": int(selected_row.get("subsidiary_count", 0)),
+                    "website_count": int(selected_row.get("website_count", 0)),
+                    "digital_ads": int(selected_row.get("digital_ads", 0)),
+                    "epubs": int(selected_row.get("epubs", 0)),
+                    "software": int(selected_row.get("software", 0)),
+                    "dam": int(selected_row.get("dam", 0)),
+                    "webserver": int(selected_row.get("webserver", 0)),
+                    "start_time": _time_to_db(selected_row.get("start_time")),
+                    "end_time": _time_to_db(selected_row.get("end_time")),
+                }
+                changed_payload = {key: value for key, value in proposed_values.items() if value != original_values.get(key)}
+
+                res = update_company_asset_fields(selected_id, changed_payload)
+                if res is True:
+                    st.session_state.op_count += 1
+                    st.success("Asset Mapping fields updated for the selected company.")
+                    st.rerun()
+                elif res is False:
+                    st.info("No Asset Mapping changes detected for the selected company.")
+    elif n_sel > 1:
+        st.info("Select exactly one company to edit all Asset Mapping fields.")
+    else:
+        st.caption("Select exactly one company above to open the full Asset Mapping editor.")
+
     # ── Action toolbar ──
     st.markdown("---")
     if n_sel == 0:
@@ -973,7 +1276,433 @@ def tab_companies(cdf: pd.DataFrame):
                     st.success(f"Updated subsidiary count to {new_sub} for {n_sel} company/companies.")
                     st.rerun()
 
+    st.markdown("")
+    if n_sel == 1:
+        selected_id = int(selected.iloc[0]["ID"])
+        selected_row = id_to_row.loc[selected_id] if selected_id in id_to_row.index else None
+
+        if selected_row is not None:
+            st.markdown("### Edit Asset Mapping")
+            st.caption("Update the selected company’s Asset Mapping fields. QA and Salesforce reviewer fields are intentionally excluded here.")
+
+            with st.form(f"company_asset_edit_{selected_id}_{st.session_state.get('op_count', 0)}"):
+                ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                subsidiaries_val = ec1.number_input(
+                    "Subsidiaries",
+                    min_value=0,
+                    value=int(selected_row.get("subsidiary_count", 0)),
+                    key=f"cmp_sub_{selected_id}",
+                )
+                websites_val = ec2.number_input(
+                    "Websites",
+                    min_value=0,
+                    value=int(selected_row.get("website_count", 0)),
+                    key=f"cmp_web_{selected_id}",
+                )
+                digital_ads_val = ec3.number_input(
+                    "Digital Ads",
+                    min_value=0,
+                    value=int(selected_row.get("digital_ads", 0)),
+                    key=f"cmp_digital_ads_{selected_id}",
+                )
+                epubs_val = ec4.number_input(
+                    "Epubs",
+                    min_value=0,
+                    value=int(selected_row.get("epubs", 0)),
+                    key=f"cmp_epubs_{selected_id}",
+                )
+                software_val = ec5.number_input(
+                    "Software",
+                    min_value=0,
+                    value=int(selected_row.get("software", 0)),
+                    key=f"cmp_software_{selected_id}",
+                )
+
+                ec6, ec7, ec8, ec9 = st.columns(4)
+                dam_val = ec6.number_input(
+                    "DAM",
+                    min_value=0,
+                    value=int(selected_row.get("dam", 0)),
+                    key=f"cmp_dam_{selected_id}",
+                )
+                webserver_val = ec7.number_input(
+                    "Webserver",
+                    min_value=0,
+                    value=int(selected_row.get("webserver", 0)),
+                    key=f"cmp_webserver_{selected_id}",
+                )
+                start_time_val = ec8.time_input(
+                    "Start Time",
+                    value=_parse_time_value(selected_row.get("start_time")),
+                    key=f"cmp_start_time_{selected_id}",
+                    step=60,
+                )
+                end_time_val = ec9.time_input(
+                    "End Time",
+                    value=_parse_time_value(selected_row.get("end_time")),
+                    key=f"cmp_end_time_{selected_id}",
+                    step=60,
+                )
+
+                save_asset_changes = st.form_submit_button(
+                    "💾 Save Asset Mapping Changes",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            if save_asset_changes:
+                proposed_values = {
+                    "subsidiary_count": int(subsidiaries_val),
+                    "website_count": int(websites_val),
+                    "digital_ads": int(digital_ads_val),
+                    "epubs": int(epubs_val),
+                    "software": int(software_val),
+                    "dam": int(dam_val),
+                    "webserver": int(webserver_val),
+                    "start_time": _time_to_db(start_time_val),
+                    "end_time": _time_to_db(end_time_val),
+                }
+                original_values = {
+                    "subsidiary_count": int(selected_row.get("subsidiary_count", 0)),
+                    "website_count": int(selected_row.get("website_count", 0)),
+                    "digital_ads": int(selected_row.get("digital_ads", 0)),
+                    "epubs": int(selected_row.get("epubs", 0)),
+                    "software": int(selected_row.get("software", 0)),
+                    "dam": int(selected_row.get("dam", 0)),
+                    "webserver": int(selected_row.get("webserver", 0)),
+                    "start_time": _time_to_db(selected_row.get("start_time")),
+                    "end_time": _time_to_db(selected_row.get("end_time")),
+                }
+                changed_payload = {
+                    key: value for key, value in proposed_values.items()
+                    if value != original_values.get(key)
+                }
+
+                res = update_company_asset_fields(selected_id, changed_payload)
+                if res is True:
+                    st.session_state.op_count += 1
+                    st.success("Asset Mapping fields updated for the selected company.")
+                    st.rerun()
+                elif res is False:
+                    st.info("No Asset Mapping changes detected for the selected company.")
+    elif n_sel > 1:
+        st.info("Select exactly one company to edit all Asset Mapping fields.")
+
 # ─── Tab 3: Analytics ─────────────────────────────────────────────────────────
+def tab_companies(cdf: pd.DataFrame):
+    st.markdown("## 🏢 Company Overview")
+
+    total = len(cdf)
+    done = int((cdf["status"] == "completed").sum()) if not cdf.empty else 0
+    pending = total - done
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("📋 Total Companies", total)
+    m2.metric("✅ Completed", done)
+    m3.metric("⏳ Pending", pending)
+    m4.metric("📈 Progress", f"{done / total * 100:.1f}%" if total else "0%")
+
+    st.divider()
+    st.markdown("### Researcher Assignment Summary")
+    rows = []
+    for r in RESEARCHERS:
+        r_df = cdf[_safe_col(cdf, "assigned_to") == r]
+        n_total = len(r_df)
+        n_done = int((r_df["status"] == "completed").sum()) if not r_df.empty else 0
+        n_sub = int(r_df["subsidiary_count"].sum()) if not r_df.empty else 0
+        rows.append({
+            "Researcher": r,
+            "Assigned": n_total,
+            "Completed": n_done,
+            "Pending": n_total - n_done,
+            "Subsidiaries": n_sub,
+            "Progress": f"{n_done / n_total * 100:.0f}%" if n_total else "—",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### All Companies")
+    fc1, fc2, fc3 = st.columns([3, 3, 4])
+    f_researcher = fc1.selectbox("Researcher", ["All"] + RESEARCHERS, key="co_r_clean")
+    f_status = fc2.selectbox("Status", ["All", "Pending", "Completed"], key="co_s_clean")
+    f_search = fc3.text_input("Search", placeholder="Type company name...", key="co_search_clean")
+
+    view = cdf.copy()
+    if f_researcher != "All":
+        view = view[_safe_col(view, "assigned_to") == f_researcher]
+    if f_status == "Pending":
+        view = view[view["status"] == "pending"]
+    elif f_status == "Completed":
+        view = view[view["status"] == "completed"]
+    if f_search:
+        view = view[view["company_name"].str.contains(f_search, case=False, na=False)]
+
+    st.caption(f"Showing {len(view)} of {total} companies")
+    if view.empty:
+        st.info("No companies match the current filters.")
+        return
+
+    assignee_options = ["— Unassigned —"] + RESEARCHERS
+    display = view[["id", "company_name", "assigned_to", "status", "subsidiary_count", "website_count", "qa_status", "fud_status", "date_completed", "qa_done_date", "fud_done_date"]].copy()
+    display.columns = ["ID", "Company Name", "Assigned To", "Status", "Subsidiary", "Websites", "QA Reviewer", "FUD Reviewer", "LEM Date", "QA Date", "FUD Date"]
+    display["Assigned To"] = display["Assigned To"].apply(lambda x: x if (x and x in RESEARCHERS) else "— Unassigned —")
+    display["Status"] = display["Status"].map({"completed": "✅ Completed", "pending": "⏳ Pending"})
+    display["LEM Date"] = pd.to_datetime(display["LEM Date"], errors="coerce").dt.date
+    display["QA Reviewer"] = display["QA Reviewer"].apply(lambda x: x if (x and x in QA_REVIEWERS) else "—")
+    display["FUD Reviewer"] = display["FUD Reviewer"].apply(lambda x: x if (x and x in FUD_REVIEWERS) else "—")
+    display["QA Date"] = pd.to_datetime(display["QA Date"], errors="coerce").dt.date
+    display["FUD Date"] = pd.to_datetime(display["FUD Date"], errors="coerce").dt.date
+
+    original_assignees = display.set_index("ID")["Assigned To"].to_dict()
+    original_qa_reviewers = display.set_index("ID")["QA Reviewer"].to_dict()
+    original_fud_reviewers = display.set_index("ID")["FUD Reviewer"].to_dict()
+    original_lem_dates = display.set_index("ID")["LEM Date"].to_dict()
+    original_qa_dates = display.set_index("ID")["QA Date"].to_dict()
+    original_fud_dates = display.set_index("ID")["FUD Date"].to_dict()
+    id_to_row = view.set_index("id")
+    sel_all_key = f"sel_all_clean_{f_researcher}_{f_status}_{f_search}"
+    if sel_all_key not in st.session_state:
+        st.session_state[sel_all_key] = False
+
+    _sa_col, _ = st.columns([1, 9])
+    with _sa_col:
+        if st.button("☑ Deselect All" if st.session_state[sel_all_key] else "☑ Select All", key=f"btn_selall_{sel_all_key}", use_container_width=True):
+            st.session_state[sel_all_key] = not st.session_state[sel_all_key]
+            st.rerun()
+
+    display.insert(0, "Select", st.session_state[sel_all_key])
+    editor_key = f"co_ed_clean_{f_researcher}_{f_status}_{f_search}_{st.session_state.get('op_count', 0)}"
+    edited = st.data_editor(
+        display,
+        column_config={
+            "Select": st.column_config.CheckboxColumn("☑", default=False, width="small"),
+            "ID": st.column_config.NumberColumn(width="small"),
+            "Company Name": st.column_config.TextColumn(width="large"),
+            "Assigned To": st.column_config.SelectboxColumn("Assigned To", options=assignee_options, width="medium", required=True),
+            "Status": st.column_config.TextColumn(width="medium"),
+            "Subsidiary": st.column_config.NumberColumn(width="small"),
+            "Websites": st.column_config.NumberColumn(width="small"),
+            "QA Reviewer": st.column_config.SelectboxColumn("QA Reviewer", options=["—"] + QA_REVIEWERS, width="medium", required=False),
+            "FUD Reviewer": st.column_config.SelectboxColumn("FUD Reviewer", options=["—"] + FUD_REVIEWERS, width="medium", required=False),
+            "LEM Date": st.column_config.DateColumn("LEM Date", width="small", format="YYYY-MM-DD"),
+            "QA Date": st.column_config.DateColumn("QA Date", width="small", format="YYYY-MM-DD"),
+            "FUD Date": st.column_config.DateColumn("FUD Date", width="small", format="YYYY-MM-DD"),
+        },
+        disabled=["ID", "Company Name", "Status"],
+        hide_index=True,
+        use_container_width=True,
+        key=editor_key,
+    )
+
+    changed_assign = edited[edited.apply(lambda r: r["Assigned To"] != original_assignees.get(r["ID"], "— Unassigned —"), axis=1)]
+    if not changed_assign.empty:
+        st.info(f"**{len(changed_assign)} assignee change(s) pending** — click Save to apply.")
+        if st.button("ð Save Assignee Changes", type="primary", key="btn_save_assign_clean"):
+            sb = get_sb()
+            for _, row in changed_assign.iterrows():
+                new_val = row["Assigned To"]
+                sb.table("companies").update({"assigned_to": None if new_val == "— Unassigned —" else new_val}).eq("id", int(row["ID"])).execute()
+            bust_cache()
+            st.session_state.op_count += 1
+            st.success(f"Saved assignee changes for {len(changed_assign)} company/companies.")
+            st.rerun()
+
+    # Check for changes in QA Reviewer, FUD Reviewer, and date fields
+    def has_field_change(row, field_name, original_dict):
+        original_val = original_dict.get(row["ID"], None)
+        new_val = row[field_name]
+        # Handle NaT/None comparison for dates
+        if pd.isna(original_val) and pd.isna(new_val):
+            return False
+        return str(original_val) != str(new_val)
+
+    changed_qa_reviewers = edited[edited.apply(lambda r: has_field_change(r, "QA Reviewer", original_qa_reviewers), axis=1)]
+    changed_fud_reviewers = edited[edited.apply(lambda r: has_field_change(r, "FUD Reviewer", original_fud_reviewers), axis=1)]
+    changed_lem_dates = edited[edited.apply(lambda r: has_field_change(r, "LEM Date", original_lem_dates), axis=1)]
+    changed_qa_dates = edited[edited.apply(lambda r: has_field_change(r, "QA Date", original_qa_dates), axis=1)]
+    changed_fud_dates = edited[edited.apply(lambda r: has_field_change(r, "FUD Date", original_fud_dates), axis=1)]
+
+    # Combine all changes
+    all_field_changes = pd.concat([
+        changed_qa_reviewers.assign(change_type="QA Reviewer"),
+        changed_fud_reviewers.assign(change_type="FUD Reviewer"),
+        changed_lem_dates.assign(change_type="LEM Date"),
+        changed_qa_dates.assign(change_type="QA Date"),
+        changed_fud_dates.assign(change_type="FUD Date")
+    ]).drop_duplicates(subset=["ID"])
+
+    if not all_field_changes.empty:
+        st.info(f"**{len(all_field_changes)} field change(s) pending** — click Save to apply reviewer and date updates.")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("ð Save Field Changes", type="primary", key="btn_save_field_changes"):
+                sb = get_sb()
+                success_count = 0
+                for _, row in all_field_changes.iterrows():
+                    update_data = {}
+                    company_id = int(row["ID"])
+                    
+                    # QA Reviewer
+                    if has_field_change(row, "QA Reviewer", original_qa_reviewers):
+                        new_qa = row["QA Reviewer"]
+                        update_data["qa_status"] = None if new_qa == "—" else new_qa
+                    
+                    # FUD Reviewer
+                    if has_field_change(row, "FUD Reviewer", original_fud_reviewers):
+                        new_fud = row["FUD Reviewer"]
+                        update_data["fud_status"] = None if new_fud == "—" else new_fud
+                    
+                    # LEM Date
+                    if has_field_change(row, "LEM Date", original_lem_dates):
+                        new_lem_date = row["LEM Date"]
+                        update_data["date_completed"] = None if pd.isna(new_lem_date) else str(new_lem_date)
+                    
+                    # QA Date
+                    if has_field_change(row, "QA Date", original_qa_dates):
+                        new_qa_date = row["QA Date"]
+                        update_data["qa_done_date"] = None if pd.isna(new_qa_date) else str(new_qa_date)
+                    
+                    # FUD Date
+                    if has_field_change(row, "FUD Date", original_fud_dates):
+                        new_fud_date = row["FUD Date"]
+                        update_data["fud_done_date"] = None if pd.isna(new_fud_date) else str(new_fud_date)
+                    
+                    if update_data:
+                        sb.table("companies").update(update_data).eq("id", company_id).execute()
+                        success_count += 1
+                
+                if success_count > 0:
+                    bust_cache()
+                    st.session_state.op_count += 1
+                    st.success(f"Successfully saved field changes for {success_count} company/companies.")
+                    st.rerun()
+                else:
+                    st.warning("No changes were saved.")
+        
+        with col2:
+            if st.button("â Reset Changes", key="btn_reset_field_changes"):
+                st.rerun()
+
+    selected = edited[edited["Select"] == True]
+    n_sel = len(selected)
+
+    st.markdown("---")
+    if n_sel == 1:
+        selected_id = int(selected.iloc[0]["ID"])
+        selected_row = id_to_row.loc[selected_id] if selected_id in id_to_row.index else None
+        if selected_row is not None:
+            st.markdown("### Selected Company Asset Mapping")
+            st.caption(f"Editing: {selected_row.get('company_name', '')} (ID: {selected_id})")
+
+            with st.form(f"company_asset_edit_clean_{selected_id}_{st.session_state.get('op_count', 0)}"):
+                ec1, ec2, ec3, ec4 = st.columns(4)
+                subsidiaries_val = ec1.number_input("Subsidiaries", min_value=0, value=int(selected_row.get("subsidiary_count", 0)), key=f"cmp_clean_sub_{selected_id}")
+                websites_val = ec2.number_input("Websites", min_value=0, value=int(selected_row.get("website_count", 0)), key=f"cmp_clean_web_{selected_id}")
+                app_val = ec3.number_input("App", min_value=0, value=int(selected_row.get("app", 0)), key=f"cmp_clean_app_{selected_id}")
+                digital_ads_val = ec4.number_input("Digital Ads", min_value=0, value=int(selected_row.get("digital_ads", 0)), key=f"cmp_clean_digital_ads_{selected_id}")
+
+                ec5, ec6, ec7, ec8, ec9 = st.columns(5)
+                epubs_val = ec5.number_input("Epubs", min_value=0, value=int(selected_row.get("epubs", 0)), key=f"cmp_clean_epubs_{selected_id}")
+                software_val = ec6.number_input("Software", min_value=0, value=int(selected_row.get("software", 0)), key=f"cmp_clean_software_{selected_id}")
+                dam_val = ec7.number_input("DAM", min_value=0, value=int(selected_row.get("dam", 0)), key=f"cmp_clean_dam_{selected_id}")
+                webserver_val = ec8.number_input("Webserver", min_value=0, value=int(selected_row.get("webserver", 0)), key=f"cmp_clean_webserver_{selected_id}")
+                start_time_val = ec9.time_input("Start Time", value=_parse_time_value(selected_row.get("start_time")), key=f"cmp_clean_start_time_{selected_id}", step=60)
+
+                ec10, ec11, ec12, ec13 = st.columns(4)
+                end_time_val = ec10.time_input("End Time", value=_parse_time_value(selected_row.get("end_time")), key=f"cmp_clean_end_time_{selected_id}", step=60)
+                start_date_val = ec11.date_input("Start Date", value=_parse_date_value(selected_row.get("start_date")), key=f"cmp_clean_start_date_{selected_id}")
+                end_date_val = ec12.date_input("End Date", value=_parse_date_value(selected_row.get("end_date")), key=f"cmp_clean_end_date_{selected_id}")
+                save_asset_changes = ec13.form_submit_button("💾 Save Asset Mapping Changes", type="primary", use_container_width=True)
+
+            if save_asset_changes:
+                proposed_values = {
+                    "subsidiary_count": int(subsidiaries_val),
+                    "website_count": int(websites_val),
+                    "app": int(app_val),
+                    "digital_ads": int(digital_ads_val),
+                    "epubs": int(epubs_val),
+                    "software": int(software_val),
+                    "dam": int(dam_val),
+                    "webserver": int(webserver_val),
+                    "start_date": _date_to_db(start_date_val),
+                    "end_date": _date_to_db(end_date_val),
+                    "start_time": _time_to_db(start_time_val),
+                    "end_time": _time_to_db(end_time_val),
+                }
+                original_values = {
+                    "subsidiary_count": int(selected_row.get("subsidiary_count", 0)),
+                    "website_count": int(selected_row.get("website_count", 0)),
+                    "app": int(selected_row.get("app", 0)),
+                    "digital_ads": int(selected_row.get("digital_ads", 0)),
+                    "epubs": int(selected_row.get("epubs", 0)),
+                    "software": int(selected_row.get("software", 0)),
+                    "dam": int(selected_row.get("dam", 0)),
+                    "webserver": int(selected_row.get("webserver", 0)),
+                    "start_date": _date_to_db(selected_row.get("start_date")),
+                    "end_date": _date_to_db(selected_row.get("end_date")),
+                    "start_time": _time_to_db(selected_row.get("start_time")),
+                    "end_time": _time_to_db(selected_row.get("end_time")),
+                }
+                changed_payload = {k: v for k, v in proposed_values.items() if v != original_values.get(k)}
+                res = update_company_asset_fields(selected_id, changed_payload)
+                if res is True:
+                    st.session_state.op_count += 1
+                    st.success("Asset Mapping fields updated for the selected company.")
+                    st.rerun()
+                elif res is False:
+                    st.info("No Asset Mapping changes detected for the selected company.")
+    elif n_sel > 1:
+        st.info("Select exactly one company to view and edit Asset Mapping details.")
+    else:
+        st.caption("Select exactly one company above to open the Asset Mapping editor.")
+
+    st.markdown("---")
+    if n_sel == 0:
+        st.caption("☝️ Check rows above to select companies, then use the actions below.")
+        action_disabled = True
+    else:
+        st.markdown(f"**{n_sel} company/companies selected** — choose an action:")
+        action_disabled = False
+
+    ac1, ac2, ac3 = st.columns([2, 2, 6])
+    with ac1:
+        if st.button(f"🗑️ Delete ({n_sel})" if n_sel else "🗑️ Delete", disabled=action_disabled, key="btn_delete_clean", use_container_width=True):
+            ids = selected["ID"].tolist()
+            delete_companies(ids)
+            st.session_state.op_count += 1
+            st.session_state[sel_all_key] = False
+            st.success(f"Deleted {n_sel} company/companies.")
+            st.rerun()
+
+    sel_completed = selected[selected["Status"] == "✅ Completed"]
+    with ac2:
+        if st.button(
+            f"↩️ Revert ({len(sel_completed)})" if len(sel_completed) else "↩️ Revert",
+            disabled=(action_disabled or len(sel_completed) == 0),
+            key="btn_revert_clean",
+            use_container_width=True,
+            help="Revert selected completed companies back to pending",
+        ):
+            ids = sel_completed["ID"].tolist()
+            revert_companies(ids)
+            st.session_state.op_count += 1
+            st.session_state[sel_all_key] = False
+            st.success(f"Reverted {len(ids)} companies to pending.")
+            st.rerun()
+
+    with ac3:
+        if not action_disabled:
+            with st.popover("✏️ Edit Subsidiary Count", use_container_width=True):
+                new_sub = st.number_input("New Subsidiary Count", min_value=0, value=0, key="new_sub_val_clean")
+                if st.button("Save", type="primary", key="btn_save_sub_clean"):
+                    sb = get_sb()
+                    for cid in selected["ID"].tolist():
+                        sb.table("companies").update({"subsidiary_count": new_sub}).eq("id", cid).execute()
+                    bust_cache()
+                    st.session_state.op_count += 1
+                    st.success(f"Updated subsidiary count to {new_sub} for {n_sel} company/companies.")
+                    st.rerun()
+
 def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
     st.markdown("## 📊 Analytics")
 
@@ -998,37 +1727,109 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
         & (_safe_col(cdf, "date_completed") <= end_str)
     ]
 
-    # Overview — all from company-level data
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("✅ LEM/AM Completed", len(done_range))
-    m2.metric("📦 Subsidiaries", int(done_range["subsidiary_count"].sum()) if not done_range.empty else 0)
-    m3.metric("🌐 Websites", int(done_range["website_count"].sum()) if not done_range.empty else 0)
-    m4.metric("🔍 QA Done", int(done_range["qa_status"].astype(bool).sum()) if not done_range.empty else 0)
-    m5.metric("📋 FUD Done", int(done_range["fud_status"].astype(bool).sum()) if not done_range.empty else 0)
+    metric_totals = {
+        "asset_mapping_total": len(done_range),
+        "subsidiaries_total": int(done_range["subsidiary_count"].sum()) if not done_range.empty else 0,
+        "websites_total": int(done_range["website_count"].sum()) if not done_range.empty else 0,
+        "app_total": int(done_range["app"].sum()) if not done_range.empty else 0,
+        "qa_total": int(done_range["qa_status"].astype(bool).sum()) if not done_range.empty else 0,
+        "salesforce_ready_total": int(done_range["fud_status"].astype(bool).sum()) if not done_range.empty else 0,
+        "digital_ads_total": int(done_range["digital_ads"].sum()) if not done_range.empty else 0,
+        "epubs_total": int(done_range["epubs"].sum()) if not done_range.empty else 0,
+        "software_total": int(done_range["software"].sum()) if not done_range.empty else 0,
+        "dam_total": int(done_range["dam"].sum()) if not done_range.empty else 0,
+        "webserver_total": int(done_range["webserver"].sum()) if not done_range.empty else 0,
+    }
+
+    
+    # Helper function to create simple metric display
+    def create_simple_metric(icon, title, value):
+        return f"""
+        <div style="text-align: center; padding: 20px;">
+            <div style="font-size: 24px; margin-bottom: 8px;">{icon}</div>
+            <div style="font-size: 14px; color: #94a3b8; margin-bottom: 8px; font-weight: 500;">{title}</div>
+            <div style="font-size: 32px; font-weight: bold; color: #f8fafc; line-height: 1;">{value:,}</div>
+        </div>
+        """
+
+    # Main metrics - always visible
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.markdown(create_simple_metric("", "Asset Mapping Completed", metric_totals["asset_mapping_total"]), unsafe_allow_html=True)
+    with col2:
+        st.markdown(create_simple_metric("", "Subsidiaries", metric_totals["subsidiaries_total"]), unsafe_allow_html=True)
+    with col3:
+        st.markdown(create_simple_metric("", "Websites", metric_totals["websites_total"]), unsafe_allow_html=True)
+    with col4:
+        st.markdown(create_simple_metric("", "QA Done", metric_totals["qa_total"]), unsafe_allow_html=True)
+    with col5:
+        st.markdown(create_simple_metric("", "Salesforce Ready", metric_totals["salesforce_ready_total"]), unsafe_allow_html=True)
+
+    # Toggle button for extended assets
+    st.markdown("")
+    toggle_col1, toggle_col2, toggle_col3 = st.columns([1, 2, 1])
+    with toggle_col2:
+        if st.button(
+            " Show More Assets" if not st.session_state.show_all_assets else " Show Less Assets",
+            use_container_width=True,
+            type="secondary",
+            key="toggle_assets"
+        ):
+            st.session_state.show_all_assets = not st.session_state.show_all_assets
+            st.rerun()
+
+    # Extended assets - only visible when toggle is on
+    if st.session_state.show_all_assets:
+        # Responsive grid for extended assets (6 columns to include App)
+        ext_col1, ext_col2, ext_col3, ext_col4, ext_col5, ext_col6 = st.columns([1, 1, 1, 1, 1, 1])
+        with ext_col1:
+            st.markdown(create_simple_metric("", "Digital Ads", metric_totals["digital_ads_total"]), unsafe_allow_html=True)
+        with ext_col2:
+            st.markdown(create_simple_metric("", "Epubs", metric_totals["epubs_total"]), unsafe_allow_html=True)
+        with ext_col3:
+            st.markdown(create_simple_metric("", "Software", metric_totals["software_total"]), unsafe_allow_html=True)
+        with ext_col4:
+            st.markdown(create_simple_metric("", "DAM", metric_totals["dam_total"]), unsafe_allow_html=True)
+        with ext_col5:
+            st.markdown(create_simple_metric("", "Webserver", metric_totals["webserver_total"]), unsafe_allow_html=True)
+        with ext_col6:
+            st.markdown(create_simple_metric("", "App", metric_totals["app_total"]), unsafe_allow_html=True)
 
     st.divider()
 
-    # ── Researcher summary table ──
+    # Researcher summary table
     st.markdown("### Researcher Summary")
     rows = []
     for r in RESEARCHERS:
         r_done = done_range[_safe_col(done_range, "assigned_to") == r]
         rows.append({
             "Researcher": r,
-            "LEM/AM Done": len(r_done),
+            "Asset Mapping": len(r_done),
             "Subsidiaries": int(r_done["subsidiary_count"].sum()) if not r_done.empty else 0,
             "Websites": int(r_done["website_count"].sum()) if not r_done.empty else 0,
+            "App": int(r_done["app"].sum()) if not r_done.empty else 0,
+            "Digital Ads": int(r_done["digital_ads"].sum()) if not r_done.empty else 0,
+            "Epubs": int(r_done["epubs"].sum()) if not r_done.empty else 0,
+            "Software": int(r_done["software"].sum()) if not r_done.empty else 0,
+            "DAM": int(r_done["dam"].sum()) if not r_done.empty else 0,
+            "Webserver": int(r_done["webserver"].sum()) if not r_done.empty else 0,
             "QA Done": int(r_done["qa_status"].astype(bool).sum()) if not r_done.empty else 0,
-            "FUD Done": int(r_done["fud_status"].astype(bool).sum()) if not r_done.empty else 0,
+            "Salesforce Ready": int(r_done["fud_status"].astype(bool).sum()) if not r_done.empty else 0,
         })
     summary = pd.DataFrame(rows)
     totals = {
         "Researcher": "TOTAL",
-        "LEM/AM Done": summary["LEM/AM Done"].sum(),
+        "Asset Mapping": summary["Asset Mapping"].sum(),
         "Subsidiaries": summary["Subsidiaries"].sum(),
         "Websites": summary["Websites"].sum(),
+        "App": summary["App"].sum(),
+        "Digital Ads": summary["Digital Ads"].sum(),
+        "Epubs": summary["Epubs"].sum(),
+        "Software": summary["Software"].sum(),
+        "DAM": summary["DAM"].sum(),
+        "Webserver": summary["Webserver"].sum(),
         "QA Done": summary["QA Done"].sum(),
-        "FUD Done": summary["FUD Done"].sum(),
+        "Salesforce Ready": summary["Salesforce Ready"].sum(),
     }
     st.dataframe(
         pd.concat([summary, pd.DataFrame([totals])], ignore_index=True),
@@ -1044,14 +1845,14 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
 
     # ── Bar chart: Companies per researcher ──
     st.markdown("### Companies Completed by Researcher")
-    chart_data = summary[summary["LEM/AM Done"] > 0]
+    chart_data = summary[summary["Asset Mapping"] > 0]
     fig_bar = px.bar(
         chart_data,
         x="Researcher",
-        y="LEM/AM Done",
-        color="LEM/AM Done",
+        y="Asset Mapping",
+        color="Asset Mapping",
         color_continuous_scale="Blues",
-        text="LEM/AM Done",
+        text="Asset Mapping",
         title=f"{start_d.strftime('%b %d')} – {end_d.strftime('%b %d, %Y')}",
     )
     fig_bar.update_traces(textposition="outside")
@@ -1131,7 +1932,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
 def main():
     for key, default in [
         ("logged_in", False), ("user_email", None), ("last_saved", None),
-        ("op_count", 0), ("exp_r", set()),
+        ("op_count", 0), ("exp_r", set()), ("show_all_assets", False),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
