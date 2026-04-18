@@ -27,18 +27,54 @@ create table if not exists daily_metrics (
 
 -- 3. Add company-level QA & FUD tracking columns
 --    (Run this separately if the table already exists)
-alter table companies add column if not exists website_count integer not null default 0;
+alter table public.companies add column if not exists website_count integer not null default 0;
+alter table public.companies add column if not exists app integer not null default 0;
+alter table public.companies add column if not exists digital_ads integer not null default 0;
+alter table public.companies add column if not exists epubs integer not null default 0;
+alter table public.companies add column if not exists software integer not null default 0;
+alter table public.companies add column if not exists dam integer not null default 0;
+alter table public.companies add column if not exists webserver integer not null default 0;
+alter table public.companies add column if not exists start_date date;
+alter table public.companies add column if not exists end_date date;
+alter table public.companies add column if not exists start_time time;
+alter table public.companies add column if not exists end_time time;
 
 -- QA and FUD now store reviewer names (text) instead of booleans
--- Run these to migrate existing columns:
-alter table companies alter column qa_status  type text using null;
-alter table companies alter column fud_status type text using null;
-alter table companies alter column qa_status  drop not null;
-alter table companies alter column fud_status drop not null;
-alter table companies alter column qa_status  set default null;
-alter table companies alter column fud_status set default null;
-alter table companies add column if not exists qa_done_date  date;
-alter table companies add column if not exists fud_done_date date;
+-- This block is safe on both fresh and existing DBs.
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='companies' and column_name='qa_status'
+  ) then
+    if (select data_type from information_schema.columns
+        where table_schema='public' and table_name='companies' and column_name='qa_status') <> 'text' then
+      -- Historical schemas may have qa_status as boolean; we intentionally discard old values.
+      alter table public.companies alter column qa_status type text using null;
+    end if;
+    alter table public.companies alter column qa_status drop not null;
+    alter table public.companies alter column qa_status set default null;
+  else
+    alter table public.companies add column qa_status text;
+  end if;
+
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='companies' and column_name='fud_status'
+  ) then
+    if (select data_type from information_schema.columns
+        where table_schema='public' and table_name='companies' and column_name='fud_status') <> 'text' then
+      alter table public.companies alter column fud_status type text using null;
+    end if;
+    alter table public.companies alter column fud_status drop not null;
+    alter table public.companies alter column fud_status set default null;
+  else
+    alter table public.companies add column fud_status text;
+  end if;
+end $$;
+
+alter table public.companies add column if not exists qa_done_date  date;
+alter table public.companies add column if not exists fud_done_date date;
 
 -- ============================================================
 -- Row Level Security (RLS)
@@ -46,18 +82,34 @@ alter table companies add column if not exists fud_done_date date;
 -- The anon key used by the app must be allowed to read/write.
 -- ============================================================
 
-alter table companies     enable row level security;
-alter table daily_metrics enable row level security;
+alter table public.companies     enable row level security;
+alter table public.daily_metrics enable row level security;
 
 -- Allow full access for the anon role (suitable for an internal tool)
-create policy "anon_all_companies"
-    on companies for all
-    to anon
-    using (true)
-    with check (true);
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname='public' and tablename='companies' and policyname='anon_all_companies'
+  ) then
+    create policy "anon_all_companies"
+        on public.companies for all
+        to anon
+        using (true)
+        with check (true);
+  end if;
 
-create policy "anon_all_metrics"
-    on daily_metrics for all
-    to anon
-    using (true)
-    with check (true);
+  if not exists (
+    select 1 from pg_policies
+    where schemaname='public' and tablename='daily_metrics' and policyname='anon_all_metrics'
+  ) then
+    create policy "anon_all_metrics"
+        on public.daily_metrics for all
+        to anon
+        using (true)
+        with check (true);
+  end if;
+end $$;
+
+-- Optional: immediately refresh PostgREST schema cache (same as Dashboard -> Settings -> API -> Reload schema)
+select pg_notify('pgrst', 'reload schema');
