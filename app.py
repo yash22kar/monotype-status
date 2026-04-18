@@ -1743,27 +1743,28 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
 
     
     # Helper function to create simple metric display
-    def create_simple_metric(icon, title, value):
+    def create_simple_metric(icon, title, value, gradient="linear-gradient(135deg,#1e293b,#334155)"):
         return f"""
-        <div style="text-align: center; padding: 20px;">
+        <div style="text-align: center; padding: 20px; background: {gradient};
+                    border-radius: 12px; margin: 4px; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
             <div style="font-size: 24px; margin-bottom: 8px;">{icon}</div>
-            <div style="font-size: 14px; color: #94a3b8; margin-bottom: 8px; font-weight: 500;">{title}</div>
-            <div style="font-size: 32px; font-weight: bold; color: #f8fafc; line-height: 1;">{value:,}</div>
+            <div style="font-size: 13px; color: rgba(255,255,255,0.75); margin-bottom: 8px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;">{title}</div>
+            <div style="font-size: 34px; font-weight: bold; color: #ffffff; line-height: 1;">{value:,}</div>
         </div>
         """
 
     # Main metrics - always visible
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        st.markdown(create_simple_metric("", "Asset Mapping Completed", metric_totals["asset_mapping_total"]), unsafe_allow_html=True)
+        st.markdown(create_simple_metric("✅", "Asset Mapping Completed", metric_totals["asset_mapping_total"], "linear-gradient(135deg,#1a6b3c,#27ae60)"), unsafe_allow_html=True)
     with col2:
-        st.markdown(create_simple_metric("", "Subsidiaries", metric_totals["subsidiaries_total"]), unsafe_allow_html=True)
+        st.markdown(create_simple_metric("🏢", "Subsidiaries", metric_totals["subsidiaries_total"], "linear-gradient(135deg,#1a4a7a,#2980b9)"), unsafe_allow_html=True)
     with col3:
-        st.markdown(create_simple_metric("", "Websites", metric_totals["websites_total"]), unsafe_allow_html=True)
+        st.markdown(create_simple_metric("🌐", "Websites", metric_totals["websites_total"], "linear-gradient(135deg,#0e7490,#06b6d4)"), unsafe_allow_html=True)
     with col4:
-        st.markdown(create_simple_metric("", "QA Done", metric_totals["qa_total"]), unsafe_allow_html=True)
+        st.markdown(create_simple_metric("🔍", "QA Done", metric_totals["qa_total"], "linear-gradient(135deg,#5a1a7a,#8e44ad)"), unsafe_allow_html=True)
     with col5:
-        st.markdown(create_simple_metric("", "Salesforce Ready", metric_totals["salesforce_ready_total"]), unsafe_allow_html=True)
+        st.markdown(create_simple_metric("📋", "Salesforce Ready", metric_totals["salesforce_ready_total"], "linear-gradient(135deg,#7a3a0a,#d35400)"), unsafe_allow_html=True)
 
     # Toggle button for extended assets
     st.markdown("")
@@ -1783,17 +1784,17 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
         # Responsive grid for extended assets (6 columns to include App)
         ext_col1, ext_col2, ext_col3, ext_col4, ext_col5, ext_col6 = st.columns([1, 1, 1, 1, 1, 1])
         with ext_col1:
-            st.markdown(create_simple_metric("", "Digital Ads", metric_totals["digital_ads_total"]), unsafe_allow_html=True)
+            st.markdown(create_simple_metric("📢", "Digital Ads", metric_totals["digital_ads_total"], "linear-gradient(135deg,#7a1a3a,#c0392b)"), unsafe_allow_html=True)
         with ext_col2:
-            st.markdown(create_simple_metric("", "Epubs", metric_totals["epubs_total"]), unsafe_allow_html=True)
+            st.markdown(create_simple_metric("📚", "Epubs", metric_totals["epubs_total"], "linear-gradient(135deg,#2d1a7a,#5b2be8)"), unsafe_allow_html=True)
         with ext_col3:
-            st.markdown(create_simple_metric("", "Software", metric_totals["software_total"]), unsafe_allow_html=True)
+            st.markdown(create_simple_metric("💾", "Software", metric_totals["software_total"], "linear-gradient(135deg,#7a6a0a,#d4ac0d)"), unsafe_allow_html=True)
         with ext_col4:
-            st.markdown(create_simple_metric("", "DAM", metric_totals["dam_total"]), unsafe_allow_html=True)
+            st.markdown(create_simple_metric("🗄️", "DAM", metric_totals["dam_total"], "linear-gradient(135deg,#1a5a4a,#1abc9c)"), unsafe_allow_html=True)
         with ext_col5:
-            st.markdown(create_simple_metric("", "Webserver", metric_totals["webserver_total"]), unsafe_allow_html=True)
+            st.markdown(create_simple_metric("🖥️", "Webserver", metric_totals["webserver_total"], "linear-gradient(135deg,#0a4a7a,#0ea5e9)"), unsafe_allow_html=True)
         with ext_col6:
-            st.markdown(create_simple_metric("", "App", metric_totals["app_total"]), unsafe_allow_html=True)
+            st.markdown(create_simple_metric("📱", "App", metric_totals["app_total"], "linear-gradient(135deg,#7a1a5a,#e91e8c)"), unsafe_allow_html=True)
 
     st.divider()
 
