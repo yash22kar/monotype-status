@@ -117,7 +117,7 @@ section[data-testid="stSidebar"] > div {
 # ─── Constants ────────────────────────────────────────────────────────────────
 CREDENTIALS = {
     "yash.baviskar@centralogic.net":        {"password": "Krishna@123",   "role": "admin"},
-    "research.insights@yourcompany.com":    {"password": "Research#2026", "role": "read_only"},
+    "research.insights@centralogic.com":    {"password": "Research#2026", "role": "read_only"},
 }
 
 def is_read_only() -> bool:
