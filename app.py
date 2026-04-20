@@ -115,7 +115,13 @@ section[data-testid="stSidebar"] > div {
 """, unsafe_allow_html=True)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-CREDENTIALS = {"email": "yash.baviskar@centralogic.net", "password": "Krishna@123"}
+CREDENTIALS = {
+    "yash.baviskar@centralogic.net":        {"password": "Krishna@123",   "role": "admin"},
+    "research.insights@yourcompany.com":    {"password": "Research#2026", "role": "read_only"},
+}
+
+def is_read_only() -> bool:
+    return st.session_state.get("user_role") == "read_only"
 
 RESEARCHERS = [
     "Ashwini Jadhav", "Bhushan Joshi", "Aditya Jadhav", "Sahil Mete",
@@ -494,9 +500,10 @@ def login_page():
         with st.form("login_form"):
             email = st.text_input("Email Address")
             password = st.text_input("Password", type="password")
-            if st.form_submit_button("Sign In", use_container_width=True, type="primary"):
-                if email == CREDENTIALS["email"] and password == CREDENTIALS["password"]:
-                    st.session_state.update(logged_in=True, user_email=email, last_saved=None)
+            if st.form_submit_button("Sign In", width='stretch', type="primary"):
+                user = CREDENTIALS.get(email)
+                if user and password == user["password"]:
+                    st.session_state.update(logged_in=True, user_email=email, user_role=user["role"], last_saved=None)
                     st.rerun()
                 else:
                     st.error("Invalid email or password.")
@@ -519,74 +526,75 @@ def render_sidebar(cdf: pd.DataFrame):
         st.divider()
 
         # ── MIDDLE: Admin actions ──────────────────────────────────────
-        st.markdown(
-            "<p style='font-size:0.75rem;font-weight:700;text-transform:uppercase;"
-            "letter-spacing:0.07em;color:rgba(255,255,255,0.4);margin-bottom:6px;'>Admin Actions</p>",
-            unsafe_allow_html=True,
-        )
+        if not is_read_only():
+            st.markdown(
+                "<p style='font-size:0.75rem;font-weight:700;text-transform:uppercase;"
+                "letter-spacing:0.07em;color:rgba(255,255,255,0.4);margin-bottom:6px;'>Admin Actions</p>",
+                unsafe_allow_html=True,
+            )
 
-        with st.expander("📥 Import Companies (CSV)"):
-            st.caption("CSV must have `company_name`. Optional: `assigned_to`.")
-            uploaded = st.file_uploader("Upload CSV", type="csv", key="csv_up")
-            if uploaded:
-                try:
-                    df_up = pd.read_csv(uploaded)
-                    if "company_name" not in df_up.columns:
-                        st.error("`company_name` column is required.")
-                    else:
-                        st.dataframe(df_up.head(5), use_container_width=True)
-                        st.caption(f"{len(df_up)} rows found")
-                        if st.button("⬆️ Import All", type="primary", key="btn_import"):
-                            rows = []
-                            for _, row in df_up.iterrows():
-                                r = {"company_name": str(row["company_name"]).strip()}
-                                if "assigned_to" in df_up.columns and pd.notna(row.get("assigned_to")):
-                                    val = str(row["assigned_to"]).strip()
-                                    if val in RESEARCHERS:
-                                        r["assigned_to"] = val
-                                rows.append(r)
-                            insert_companies(rows)
-                            st.success(f"Imported {len(rows)} companies!")
+            with st.expander("📥 Import Companies (CSV)"):
+                st.caption("CSV must have `company_name`. Optional: `assigned_to`.")
+                uploaded = st.file_uploader("Upload CSV", type="csv", key="csv_up")
+                if uploaded:
+                    try:
+                        df_up = pd.read_csv(uploaded)
+                        if "company_name" not in df_up.columns:
+                            st.error("`company_name` column is required.")
+                        else:
+                            st.dataframe(df_up.head(5), width='stretch')
+                            st.caption(f"{len(df_up)} rows found")
+                            if st.button("⬆️ Import All", type="primary", key="btn_import"):
+                                rows = []
+                                for _, row in df_up.iterrows():
+                                    r = {"company_name": str(row["company_name"]).strip()}
+                                    if "assigned_to" in df_up.columns and pd.notna(row.get("assigned_to")):
+                                        val = str(row["assigned_to"]).strip()
+                                        if val in RESEARCHERS:
+                                            r["assigned_to"] = val
+                                    rows.append(r)
+                                insert_companies(rows)
+                                st.success(f"Imported {len(rows)} companies!")
+                                st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+            with st.expander("➕ Add Company"):
+                with st.form("add_company_form"):
+                    cname = st.text_input("Company Name")
+                    cassign = st.selectbox("Assign To", ["— Unassigned —"] + RESEARCHERS)
+                    if st.form_submit_button("Add", type="primary"):
+                        if cname.strip():
+                            r = {"company_name": cname.strip()}
+                            if cassign != "— Unassigned —":
+                                r["assigned_to"] = cassign
+                            insert_companies([r])
+                            st.success(f"Added: {cname.strip()}")
                             st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+                        else:
+                            st.error("Company name is required.")
 
-        with st.expander("➕ Add Company"):
-            with st.form("add_company_form"):
-                cname = st.text_input("Company Name")
-                cassign = st.selectbox("Assign To", ["— Unassigned —"] + RESEARCHERS)
-                if st.form_submit_button("Add", type="primary"):
-                    if cname.strip():
-                        r = {"company_name": cname.strip()}
-                        if cassign != "— Unassigned —":
-                            r["assigned_to"] = cassign
-                        insert_companies([r])
-                        st.success(f"Added: {cname.strip()}")
-                        st.rerun()
-                    else:
-                        st.error("Company name is required.")
-
-        with st.expander("👤 Assign Unassigned"):
-            unassigned = cdf[_safe_col(cdf, "assigned_to") == ""]
-            st.caption(f"{len(unassigned)} unassigned companies")
-            if not unassigned.empty:
-                target_r = st.selectbox("Researcher", RESEARCHERS, key="sb_r")
-                picked = st.multiselect("Companies", unassigned["company_name"].tolist(), key="sb_c")
-                if st.button("Assign →", type="primary", key="btn_assign"):
-                    if picked:
-                        ids = unassigned[unassigned["company_name"].isin(picked)]["id"].tolist()
-                        assign_companies(ids, target_r)
-                        st.success(f"Assigned {len(ids)} to {target_r}.")
-                        st.rerun()
-                    else:
-                        st.warning("Select at least one company.")
-            else:
-                st.success("All companies are assigned!")
+            with st.expander("👤 Assign Unassigned"):
+                unassigned = cdf[_safe_col(cdf, "assigned_to") == ""]
+                st.caption(f"{len(unassigned)} unassigned companies")
+                if not unassigned.empty:
+                    target_r = st.selectbox("Researcher", RESEARCHERS, key="sb_r")
+                    picked = st.multiselect("Companies", unassigned["company_name"].tolist(), key="sb_c")
+                    if st.button("Assign →", type="primary", key="btn_assign"):
+                        if picked:
+                            ids = unassigned[unassigned["company_name"].isin(picked)]["id"].tolist()
+                            assign_companies(ids, target_r)
+                            st.success(f"Assigned {len(ids)} to {target_r}.")
+                            st.rerun()
+                        else:
+                            st.warning("Select at least one company.")
+                else:
+                    st.success("All companies are assigned!")
 
         # ── BOTTOM: Logout (pushed to bottom via spacer) ───────────────
         st.markdown("<div class='sidebar-spacer'></div>", unsafe_allow_html=True)
         st.divider()
-        if st.button("🚪 Logout", use_container_width=True):
+        if st.button("🚪 Logout", width='stretch'):
             st.session_state.update(logged_in=False, user_email=None)
             st.rerun()
 
@@ -637,7 +645,7 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
         })
     st.dataframe(
         pd.DataFrame(summary_rows),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "Researcher":   st.column_config.TextColumn(width="large"),
@@ -653,7 +661,10 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
 
     # ── Per-researcher expandable rows ──
     st.markdown("### Update Progress")
-    st.caption("Click ▼ on any row to expand and update that researcher's companies.")
+    if is_read_only():
+        st.caption("View-only access — data entry is disabled for this account.")
+    else:
+        st.caption("Click ▼ on any row to expand and update that researcher's companies.")
 
     if "exp_r" not in st.session_state:
         st.session_state.exp_r = set()
@@ -698,16 +709,17 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
         row_cols[4].markdown(f"<p style='text-align:center;margin:6px 0'>{qa_today}</p>",  unsafe_allow_html=True)
         row_cols[5].markdown(f"<p style='text-align:center;margin:6px 0'>{fud_today}</p>", unsafe_allow_html=True)
 
-        if row_cols[6].button(
-            "▲ Close" if is_exp else "▼ Open",
-            key=f"tog_{researcher}",
-            use_container_width=True,
-        ):
-            if is_exp:
-                st.session_state.exp_r.discard(researcher)
-            else:
-                st.session_state.exp_r.add(researcher)
-            st.rerun()
+        if not is_read_only():
+            if row_cols[6].button(
+                "▲ Close" if is_exp else "▼ Open",
+                key=f"tog_{researcher}",
+                width='stretch',
+            ):
+                if is_exp:
+                    st.session_state.exp_r.discard(researcher)
+                else:
+                    st.session_state.exp_r.add(researcher)
+                st.rerun()
 
         st.markdown(
             "<hr style='margin:2px 0;border-color:rgba(255,255,255,0.06)'>",
@@ -715,7 +727,7 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
         )
 
         # ── Expanded detail panel ──
-        if is_exp:
+        if is_exp and not is_read_only():
             with st.container():
                 # Pending companies checklist
                 if r_pending.empty:
@@ -830,8 +842,8 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
 
                         st.markdown("")
                         bc1, bc2 = st.columns(2)
-                        save_qf  = bc1.form_submit_button("💾 Save Asset Mapping Progress", use_container_width=True)
-                        mark_lem = bc2.form_submit_button("✅ Mark Asset Mapping Complete", type="primary", use_container_width=True)
+                        save_qf  = bc1.form_submit_button("💾 Save Asset Mapping Progress", width='stretch')
+                        mark_lem = bc2.form_submit_button("✅ Mark Asset Mapping Complete", type="primary", width='stretch')
 
                         if mark_lem:
                             if to_complete:
@@ -896,7 +908,7 @@ def tab_daily(cdf: pd.DataFrame, mdf: pd.DataFrame):
                             if chk:
                                 to_unmark.append(int(row["id"]))
                         st.markdown("")
-                        unmark_btn = st.form_submit_button("↩️ Unmark Selected (revert to Pending)", use_container_width=True)
+                        unmark_btn = st.form_submit_button("↩️ Unmark Selected (revert to Pending)", width='stretch')
                         if unmark_btn:
                             if to_unmark:
                                 revert_companies(to_unmark)
@@ -940,7 +952,7 @@ def tab_companies(cdf: pd.DataFrame):
             "Subsidiaries": n_sub,
             "Progress": f"{n_done / n_total * 100:.0f}%" if n_total else "—",
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
     st.divider()
 
@@ -1011,7 +1023,7 @@ def tab_companies(cdf: pd.DataFrame):
         if st.button(
             "☑ Deselect All" if st.session_state[sel_all_key] else "☑ Select All",
             key=f"btn_selall_{sel_all_key}",
-            use_container_width=True,
+            width='stretch',
         ):
             st.session_state[sel_all_key] = not st.session_state[sel_all_key]
             st.rerun()
@@ -1045,7 +1057,7 @@ def tab_companies(cdf: pd.DataFrame):
         },
         disabled=["ID", "Company Name", "Status", "LEM Date"],
         hide_index=True,
-        use_container_width=True,
+        width='stretch',
         key=editor_key,
     )
 
@@ -1180,7 +1192,7 @@ def tab_companies(cdf: pd.DataFrame):
                 start_time_val = ec8.time_input("Start Time", value=_parse_time_value(selected_row.get("start_time")), key=f"cmp_top_start_time_{selected_id}", step=60)
                 end_time_val = ec9.time_input("End Time", value=_parse_time_value(selected_row.get("end_time")), key=f"cmp_top_end_time_{selected_id}", step=60)
 
-                save_asset_changes_top = st.form_submit_button("💾 Save Asset Mapping Changes", type="primary", use_container_width=True)
+                save_asset_changes_top = st.form_submit_button("💾 Save Asset Mapping Changes", type="primary", width='stretch')
 
             if save_asset_changes_top:
                 proposed_values = {
@@ -1236,7 +1248,7 @@ def tab_companies(cdf: pd.DataFrame):
             f"🗑️ Delete ({n_sel})" if n_sel else "🗑️ Delete",
             disabled=action_disabled,
             key="btn_delete",
-            use_container_width=True,
+            width='stretch',
         ):
             ids = selected["ID"].tolist()
             delete_companies(ids)
@@ -1252,7 +1264,7 @@ def tab_companies(cdf: pd.DataFrame):
             f"↩️ Revert ({len(sel_completed)})" if sel_completed is not None and len(sel_completed) else "↩️ Revert",
             disabled=(action_disabled or len(sel_completed) == 0),
             key="btn_revert",
-            use_container_width=True,
+            width='stretch',
             help="Revert selected completed companies back to pending",
         ):
             ids = sel_completed["ID"].tolist()
@@ -1265,7 +1277,7 @@ def tab_companies(cdf: pd.DataFrame):
     # Edit subsidiary count for selected
     with ac3:
         if not action_disabled:
-            with st.popover("✏️ Edit Subsidiary Count", use_container_width=True):
+            with st.popover("✏️ Edit Subsidiary Count", width='stretch'):
                 new_sub = st.number_input("New Subsidiary Count", min_value=0, value=0, key="new_sub_val")
                 if st.button("Save", type="primary", key="btn_save_sub"):
                     sb = get_sb()
@@ -1347,7 +1359,7 @@ def tab_companies(cdf: pd.DataFrame):
                 save_asset_changes = st.form_submit_button(
                     "💾 Save Asset Mapping Changes",
                     type="primary",
-                    use_container_width=True,
+                    width='stretch',
                 )
 
             if save_asset_changes:
@@ -1418,7 +1430,7 @@ def tab_companies(cdf: pd.DataFrame):
             "Subsidiaries": n_sub,
             "Progress": f"{n_done / n_total * 100:.0f}%" if n_total else "—",
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
     st.divider()
     st.markdown("### All Companies")
@@ -1466,12 +1478,13 @@ def tab_companies(cdf: pd.DataFrame):
 
     _sa_col, _ = st.columns([1, 9])
     with _sa_col:
-        if st.button("☑ Deselect All" if st.session_state[sel_all_key] else "☑ Select All", key=f"btn_selall_{sel_all_key}", use_container_width=True):
+        if st.button("☑ Deselect All" if st.session_state[sel_all_key] else "☑ Select All", key=f"btn_selall_{sel_all_key}", width='stretch'):
             st.session_state[sel_all_key] = not st.session_state[sel_all_key]
             st.rerun()
 
     display.insert(0, "Select", st.session_state[sel_all_key])
     editor_key = f"co_ed_clean_{f_researcher}_{f_status}_{f_search}_{st.session_state.get('op_count', 0)}"
+    _ro = is_read_only()
     edited = st.data_editor(
         display,
         column_config={
@@ -1488,14 +1501,14 @@ def tab_companies(cdf: pd.DataFrame):
             "QA Date": st.column_config.DateColumn("QA Date", width="small", format="YYYY-MM-DD"),
             "FUD Date": st.column_config.DateColumn("FUD Date", width="small", format="YYYY-MM-DD"),
         },
-        disabled=["ID", "Company Name", "Status"],
+        disabled=True if _ro else ["ID", "Company Name", "Status"],
         hide_index=True,
-        use_container_width=True,
+        width='stretch',
         key=editor_key,
     )
 
     changed_assign = edited[edited.apply(lambda r: r["Assigned To"] != original_assignees.get(r["ID"], "— Unassigned —"), axis=1)]
-    if not changed_assign.empty:
+    if not _ro and not changed_assign.empty:
         st.info(f"**{len(changed_assign)} assignee change(s) pending** — click Save to apply.")
         if st.button("ð Save Assignee Changes", type="primary", key="btn_save_assign_clean"):
             sb = get_sb()
@@ -1531,7 +1544,7 @@ def tab_companies(cdf: pd.DataFrame):
         changed_fud_dates.assign(change_type="FUD Date")
     ]).drop_duplicates(subset=["ID"])
 
-    if not all_field_changes.empty:
+    if not _ro and not all_field_changes.empty:
         st.info(f"**{len(all_field_changes)} field change(s) pending** — click Save to apply reviewer and date updates.")
         col1, col2 = st.columns(2)
         with col1:
@@ -1587,7 +1600,7 @@ def tab_companies(cdf: pd.DataFrame):
     n_sel = len(selected)
 
     st.markdown("---")
-    if n_sel == 1:
+    if not _ro and n_sel == 1:
         selected_id = int(selected.iloc[0]["ID"])
         selected_row = id_to_row.loc[selected_id] if selected_id in id_to_row.index else None
         if selected_row is not None:
@@ -1612,7 +1625,7 @@ def tab_companies(cdf: pd.DataFrame):
                 end_time_val = ec10.time_input("End Time", value=_parse_time_value(selected_row.get("end_time")), key=f"cmp_clean_end_time_{selected_id}", step=60)
                 start_date_val = ec11.date_input("Start Date", value=_parse_date_value(selected_row.get("start_date")), key=f"cmp_clean_start_date_{selected_id}")
                 end_date_val = ec12.date_input("End Date", value=_parse_date_value(selected_row.get("end_date")), key=f"cmp_clean_end_date_{selected_id}")
-                save_asset_changes = ec13.form_submit_button("💾 Save Asset Mapping Changes", type="primary", use_container_width=True)
+                save_asset_changes = ec13.form_submit_button("💾 Save Asset Mapping Changes", type="primary", width='stretch')
 
             if save_asset_changes:
                 proposed_values = {
@@ -1656,17 +1669,18 @@ def tab_companies(cdf: pd.DataFrame):
     else:
         st.caption("Select exactly one company above to open the Asset Mapping editor.")
 
-    st.markdown("---")
-    if n_sel == 0:
+    if not _ro:
+      st.markdown("---")
+      if n_sel == 0:
         st.caption("☝️ Check rows above to select companies, then use the actions below.")
         action_disabled = True
-    else:
+      else:
         st.markdown(f"**{n_sel} company/companies selected** — choose an action:")
         action_disabled = False
 
-    ac1, ac2, ac3 = st.columns([2, 2, 6])
-    with ac1:
-        if st.button(f"🗑️ Delete ({n_sel})" if n_sel else "🗑️ Delete", disabled=action_disabled, key="btn_delete_clean", use_container_width=True):
+      ac1, ac2, ac3 = st.columns([2, 2, 6])
+      with ac1:
+        if st.button(f"🗑️ Delete ({n_sel})" if n_sel else "🗑️ Delete", disabled=action_disabled, key="btn_delete_clean", width='stretch'):
             ids = selected["ID"].tolist()
             delete_companies(ids)
             st.session_state.op_count += 1
@@ -1674,13 +1688,13 @@ def tab_companies(cdf: pd.DataFrame):
             st.success(f"Deleted {n_sel} company/companies.")
             st.rerun()
 
-    sel_completed = selected[selected["Status"] == "✅ Completed"]
-    with ac2:
+      sel_completed = selected[selected["Status"] == "✅ Completed"]
+      with ac2:
         if st.button(
             f"↩️ Revert ({len(sel_completed)})" if len(sel_completed) else "↩️ Revert",
             disabled=(action_disabled or len(sel_completed) == 0),
             key="btn_revert_clean",
-            use_container_width=True,
+            width='stretch',
             help="Revert selected completed companies back to pending",
         ):
             ids = sel_completed["ID"].tolist()
@@ -1690,9 +1704,9 @@ def tab_companies(cdf: pd.DataFrame):
             st.success(f"Reverted {len(ids)} companies to pending.")
             st.rerun()
 
-    with ac3:
+      with ac3:
         if not action_disabled:
-            with st.popover("✏️ Edit Subsidiary Count", use_container_width=True):
+            with st.popover("✏️ Edit Subsidiary Count", width='stretch'):
                 new_sub = st.number_input("New Subsidiary Count", min_value=0, value=0, key="new_sub_val_clean")
                 if st.button("Save", type="primary", key="btn_save_sub_clean"):
                     sb = get_sb()
@@ -1772,7 +1786,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
     with toggle_col2:
         if st.button(
             " Show More Assets" if not st.session_state.show_all_assets else " Show Less Assets",
-            use_container_width=True,
+            width='stretch',
             type="secondary",
             key="toggle_assets"
         ):
@@ -1834,7 +1848,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
     }
     st.dataframe(
         pd.concat([summary, pd.DataFrame([totals])], ignore_index=True),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
     )
 
@@ -1864,7 +1878,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
         paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(b=120),
     )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.plotly_chart(fig_bar, width='stretch')
 
     # ── Line chart: Daily trend ──
     st.divider()
@@ -1909,7 +1923,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
     )
     fig_line.update_yaxes(title_text="Companies", secondary_y=False)
     fig_line.update_yaxes(title_text="Subsidiaries", secondary_y=True)
-    st.plotly_chart(fig_line, use_container_width=True)
+    st.plotly_chart(fig_line, width='stretch')
 
     # ── Pie chart: Overall completion ──
     st.divider()
@@ -1927,12 +1941,12 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
             color_discrete_map={"Completed": "#2ecc71", "Pending": "#e67e22"},
             title=f"Total: {total_all} companies",
         )
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, width='stretch')
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
     for key, default in [
-        ("logged_in", False), ("user_email", None), ("last_saved", None),
+        ("logged_in", False), ("user_email", None), ("user_role", None), ("last_saved", None),
         ("op_count", 0), ("exp_r", set()), ("show_all_assets", False),
     ]:
         if key not in st.session_state:
