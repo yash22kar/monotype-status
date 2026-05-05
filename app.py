@@ -189,7 +189,8 @@ def get_companies() -> pd.DataFrame:
             "app", "digital_ads", "epubs", "software", "dam", "webserver",
             "start_date", "end_date",
             "start_time", "end_time",
-            "qa_status", "fud_status", "qa_done_date", "fud_done_date", "created_at"
+            "qa_status", "fud_status", "qa_done_date", "fud_done_date",
+            "wayback_status", "created_at"
         ])
     df = pd.DataFrame(data)
     for col in ASSET_COUNT_FIELDS:
@@ -209,6 +210,9 @@ def get_companies() -> pd.DataFrame:
     for col in ["qa_done_date", "fud_done_date"]:
         if col not in df.columns:
             df[col] = None
+    if "wayback_status" not in df.columns:
+        df["wayback_status"] = "completed"
+    df["wayback_status"] = df["wayback_status"].fillna("completed")
     return df
 
 def get_metrics() -> pd.DataFrame:
@@ -1455,19 +1459,21 @@ def tab_companies(cdf: pd.DataFrame):
         return
 
     assignee_options = ["— Unassigned —"] + RESEARCHERS
-    display = view[["id", "company_name", "assigned_to", "status", "subsidiary_count", "website_count", "qa_status", "fud_status", "date_completed", "qa_done_date", "fud_done_date"]].copy()
-    display.columns = ["ID", "Company Name", "Assigned To", "Status", "Subsidiary", "Websites", "QA Reviewer", "FUD Reviewer", "LEM Date", "QA Date", "FUD Date"]
+    display = view[["id", "company_name", "assigned_to", "status", "subsidiary_count", "website_count", "qa_status", "fud_status", "wayback_status", "date_completed", "qa_done_date", "fud_done_date"]].copy()
+    display.columns = ["ID", "Company Name", "Assigned To", "Status", "Subsidiary", "Websites", "QA Reviewer", "FUD Reviewer", "Wayback Status", "LEM Date", "QA Date", "FUD Date"]
     display["Assigned To"] = display["Assigned To"].apply(lambda x: x if (x and x in RESEARCHERS) else "— Unassigned —")
     display["Status"] = display["Status"].map({"completed": "✅ Completed", "pending": "⏳ Pending"})
     display["LEM Date"] = pd.to_datetime(display["LEM Date"], errors="coerce").dt.date
     display["QA Reviewer"] = display["QA Reviewer"].apply(lambda x: x if (x and x in QA_REVIEWERS) else "—")
     display["FUD Reviewer"] = display["FUD Reviewer"].apply(lambda x: x if (x and x in FUD_REVIEWERS) else "—")
+    display["Wayback Status"] = display["Wayback Status"].apply(lambda x: x if x in ("in-progress", "completed") else "completed")
     display["QA Date"] = pd.to_datetime(display["QA Date"], errors="coerce").dt.date
     display["FUD Date"] = pd.to_datetime(display["FUD Date"], errors="coerce").dt.date
 
     original_assignees = display.set_index("ID")["Assigned To"].to_dict()
     original_qa_reviewers = display.set_index("ID")["QA Reviewer"].to_dict()
     original_fud_reviewers = display.set_index("ID")["FUD Reviewer"].to_dict()
+    original_wayback_statuses = display.set_index("ID")["Wayback Status"].to_dict()
     original_lem_dates = display.set_index("ID")["LEM Date"].to_dict()
     original_qa_dates = display.set_index("ID")["QA Date"].to_dict()
     original_fud_dates = display.set_index("ID")["FUD Date"].to_dict()
@@ -1497,6 +1503,7 @@ def tab_companies(cdf: pd.DataFrame):
             "Websites": st.column_config.NumberColumn(width="small"),
             "QA Reviewer": st.column_config.SelectboxColumn("QA Reviewer", options=["—"] + QA_REVIEWERS, width="medium", required=False),
             "FUD Reviewer": st.column_config.SelectboxColumn("FUD Reviewer", options=["—"] + FUD_REVIEWERS, width="medium", required=False),
+            "Wayback Status": st.column_config.SelectboxColumn("Wayback Status", options=["completed", "in-progress"], width="medium", required=True),
             "LEM Date": st.column_config.DateColumn("LEM Date", width="small", format="YYYY-MM-DD"),
             "QA Date": st.column_config.DateColumn("QA Date", width="small", format="YYYY-MM-DD"),
             "FUD Date": st.column_config.DateColumn("FUD Date", width="small", format="YYYY-MM-DD"),
@@ -1531,6 +1538,7 @@ def tab_companies(cdf: pd.DataFrame):
 
     changed_qa_reviewers = edited[edited.apply(lambda r: has_field_change(r, "QA Reviewer", original_qa_reviewers), axis=1)]
     changed_fud_reviewers = edited[edited.apply(lambda r: has_field_change(r, "FUD Reviewer", original_fud_reviewers), axis=1)]
+    changed_wayback = edited[edited.apply(lambda r: has_field_change(r, "Wayback Status", original_wayback_statuses), axis=1)]
     changed_lem_dates = edited[edited.apply(lambda r: has_field_change(r, "LEM Date", original_lem_dates), axis=1)]
     changed_qa_dates = edited[edited.apply(lambda r: has_field_change(r, "QA Date", original_qa_dates), axis=1)]
     changed_fud_dates = edited[edited.apply(lambda r: has_field_change(r, "FUD Date", original_fud_dates), axis=1)]
@@ -1539,6 +1547,7 @@ def tab_companies(cdf: pd.DataFrame):
     all_field_changes = pd.concat([
         changed_qa_reviewers.assign(change_type="QA Reviewer"),
         changed_fud_reviewers.assign(change_type="FUD Reviewer"),
+        changed_wayback.assign(change_type="Wayback Status"),
         changed_lem_dates.assign(change_type="LEM Date"),
         changed_qa_dates.assign(change_type="QA Date"),
         changed_fud_dates.assign(change_type="FUD Date")
@@ -1564,7 +1573,11 @@ def tab_companies(cdf: pd.DataFrame):
                     if has_field_change(row, "FUD Reviewer", original_fud_reviewers):
                         new_fud = row["FUD Reviewer"]
                         update_data["fud_status"] = None if new_fud == "—" else new_fud
-                    
+
+                    # Wayback Status
+                    if has_field_change(row, "Wayback Status", original_wayback_statuses):
+                        update_data["wayback_status"] = row["Wayback Status"]
+
                     # LEM Date
                     if has_field_change(row, "LEM Date", original_lem_dates):
                         new_lem_date = row["LEM Date"]
@@ -1748,6 +1761,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
         "app_total": int(done_range["app"].sum()) if not done_range.empty else 0,
         "qa_total": int(done_range["qa_status"].astype(bool).sum()) if not done_range.empty else 0,
         "salesforce_ready_total": int(done_range["fud_status"].astype(bool).sum()) if not done_range.empty else 0,
+        "wayback_stuck_total": int((done_range["wayback_status"] == "in-progress").sum()) if not done_range.empty else 0,
         "digital_ads_total": int(done_range["digital_ads"].sum()) if not done_range.empty else 0,
         "epubs_total": int(done_range["epubs"].sum()) if not done_range.empty else 0,
         "software_total": int(done_range["software"].sum()) if not done_range.empty else 0,
@@ -1768,7 +1782,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
         """
 
     # Main metrics - always visible
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
         st.markdown(create_simple_metric("✅", "Asset Mapping Completed", metric_totals["asset_mapping_total"], "linear-gradient(135deg,#1a6b3c,#27ae60)"), unsafe_allow_html=True)
     with col2:
@@ -1779,6 +1793,8 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
         st.markdown(create_simple_metric("🔍", "QA Done", metric_totals["qa_total"], "linear-gradient(135deg,#5a1a7a,#8e44ad)"), unsafe_allow_html=True)
     with col5:
         st.markdown(create_simple_metric("📋", "Salesforce Ready", metric_totals["salesforce_ready_total"], "linear-gradient(135deg,#7a3a0a,#d35400)"), unsafe_allow_html=True)
+    with col6:
+        st.markdown(create_simple_metric("⏳", "Wayback Stuck", metric_totals["wayback_stuck_total"], "linear-gradient(135deg,#1a3a5a,#0f4c75)"), unsafe_allow_html=True)
 
     # Toggle button for extended assets
     st.markdown("")
@@ -1830,6 +1846,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
             "Webserver": int(r_done["webserver"].sum()) if not r_done.empty else 0,
             "QA Done": int(r_done["qa_status"].astype(bool).sum()) if not r_done.empty else 0,
             "Salesforce Ready": int(r_done["fud_status"].astype(bool).sum()) if not r_done.empty else 0,
+            "Wayback Stuck": int((r_done["wayback_status"] == "in-progress").sum()) if not r_done.empty else 0,
         })
     summary = pd.DataFrame(rows)
     totals = {
@@ -1845,6 +1862,7 @@ def tab_analytics(cdf: pd.DataFrame, mdf: pd.DataFrame):
         "Webserver": summary["Webserver"].sum(),
         "QA Done": summary["QA Done"].sum(),
         "Salesforce Ready": summary["Salesforce Ready"].sum(),
+        "Wayback Stuck": summary["Wayback Stuck"].sum(),
     }
     st.dataframe(
         pd.concat([summary, pd.DataFrame([totals])], ignore_index=True),

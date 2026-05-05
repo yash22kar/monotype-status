@@ -76,6 +76,10 @@ end $$;
 alter table public.companies add column if not exists qa_done_date  date;
 alter table public.companies add column if not exists fud_done_date date;
 
+-- 4. Wayback status tracking (per-company)
+alter table public.companies add column if not exists wayback_status text not null default 'completed';
+update public.companies set wayback_status = 'completed' where wayback_status is null;
+
 -- ============================================================
 -- Row Level Security (RLS)
 -- Enable these if you want to lock down access.
